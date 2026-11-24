@@ -358,6 +358,20 @@ class PortableKitTests(unittest.TestCase):
             for info in zf.infolist():
                 self.assertTrue(info.flag_bits & 0x800)
 
+    def test_native_dmg_and_windows_exe_installers_valid(self):
+        """验证标准 macOS .dmg 与原生 PE32 Windows .exe 安装程序均已构建且文件头合法。"""
+        dmg = DIST / "Claude安全锁-macOS.dmg"
+        exe = DIST / "Claude安全锁-Windows安装程序.exe"
+        self.assertTrue(dmg.is_file(), f"缺少 macOS DMG: {dmg}")
+        self.assertTrue(exe.is_file(), f"缺少 Windows EXE: {exe}")
+        self.assertGreater(dmg.stat().st_size, 50_000)
+        self.assertGreater(exe.stat().st_size, 80_000)
+        # Windows PE32 可执行文件必须以 MZ 头开头
+        self.assertTrue(exe.read_bytes().startswith(b"MZ"), "Windows 安装包必须为合法 PE 可执行文件")
+        # macOS UDZO DMG 尾部 koly trailer 校验
+        dmg_bytes = dmg.read_bytes()
+        self.assertIn(b"koly", dmg_bytes[-1024:], "macOS DMG 必须为合法 UDZO 磁盘映像")
+
 
 if __name__ == "__main__":
     unittest.main()
