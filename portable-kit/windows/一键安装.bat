@@ -38,6 +38,7 @@ if not exist "%INSTALL_DIR%\data" mkdir "%INSTALL_DIR%\data"
 copy /Y "%WIN_SRC%\claude-guard.ps1" "%INSTALL_DIR%\windows\" >nul
 copy /Y "%WIN_SRC%\ClaudeGuardUI.ps1" "%INSTALL_DIR%\windows\" >nul
 copy /Y "%WIN_SRC%\env-audit.ps1" "%INSTALL_DIR%\windows\" >nul
+copy /Y "%WIN_SRC%\claude-blocked-alert.vbs" "%INSTALL_DIR%\windows\" >nul
 copy /Y "%WIN_SRC%\Claude安全锁控制台.bat" "%INSTALL_DIR%\windows\" >nul
 copy /Y "%DATA_SRC%\overseas-ipv4-ranges.txt" "%INSTALL_DIR%\data\" >nul
 copy /Y "%DATA_SRC%\cn-ipv4.txt" "%INSTALL_DIR%\data\" >nul

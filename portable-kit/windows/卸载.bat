@@ -13,8 +13,8 @@ echo ==========================================
 echo.
 set "INSTALL_DIR=C:\ProgramData\ClaudeGuard"
 if exist "%INSTALL_DIR%\windows\claude-guard.ps1" (
-    echo 正在解开持久化硬锁并恢复原生网络...
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%INSTALL_DIR%\windows\claude-guard.ps1" unlock-all
+    echo 正在解除系统内核级 Claude 进程锁与永久防火墙规则，并恢复原生网络...
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%INSTALL_DIR%\windows\claude-guard.ps1" uninstall-all
 )
 del /F /Q "%USERPROFILE%\Desktop\Claude安全锁.lnk" 2>nul
 rmdir /S /Q "%INSTALL_DIR%" 2>nul

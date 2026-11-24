@@ -234,21 +234,32 @@ def run_audit(args):
     target_tz = cfg.get("TZ_TARGET", "")
     target_loc = cfg.get("LOCALE_TARGET", "")
 
-    # 1. 内核级持久化防直连硬锁 (方案 A+: 放行国内直连 + 阻断 Claude ASN/IP 与一切海外服务)
-    lock_on = False
+    # 1. 内核级持久化防直连硬锁 (单锁模式: active=全防护可用Claude / standby=日常模式且Claude系统级死锁)
+    lock_mode = "off"
     boot_persist = os.path.isfile(args.pf_boot_plist)
     if os.path.isfile(args.pf_anchor) and os.path.isfile(args.pf_conf):
         try:
-            if "# BEGIN claude-guard-pf" in open(args.pf_conf, encoding="utf-8", errors="ignore").read():
-                lock_on = True
+            pf_txt = open(args.pf_conf, encoding="utf-8", errors="ignore").read()
+            anc_txt = open(args.pf_anchor, encoding="utf-8", errors="ignore").read()
+            if "# BEGIN claude-guard-pf" in pf_txt:
+                if "mode=standby" in anc_txt:
+                    lock_mode = "standby"
+                elif "mode=strict" in anc_txt:
+                    lock_mode = "strict"
+                else:
+                    lock_mode = "cn"
         except OSError:
             pass
-    if lock_on and boot_persist:
-        add("killswitch", "持久化防直连硬锁 (pf)", "ok", f"已开启并注册开机守护 (锁Claude与海外/放行国内; 白名单入口={entry_nodes or '国内中转'})")
-    elif lock_on:
-        add("killswitch", "持久化防直连硬锁 (pf)", "warn", f"pf 锚点已开启但缺少开机守护，建议在控制台重新开启硬锁开关")
+    lock_on = lock_mode in ("cn", "strict")
+    if lock_mode in ("cn", "strict") and boot_persist:
+        mode_desc = "全封闭模式" if lock_mode == "strict" else "锁Claude与海外/放行国内"
+        add("killswitch", "持久化安全锁 (pf)", "ok", f"已开启并注册开机守护 ({mode_desc}; 白名单入口={entry_nodes or '国内中转'})")
+    elif lock_mode == "standby":
+        add("killswitch", "持久化安全锁 (pf)", "warn", "当前为日常上网模式 (Claude 进程与遥测网络已系统级死锁，如需使用 Claude 请先点「开启安全锁」)")
+    elif lock_mode in ("cn", "strict"):
+        add("killswitch", "持久化安全锁 (pf)", "warn", "pf 锚点已开启但缺少自愈开机守护，建议在控制台重新点一次「开启安全锁」")
     else:
-        add("killswitch", "持久化防直连硬锁 (pf)", "fail", "未开启 (当前处于允许直连状态，请先打开「持久化防直连硬锁」开关)")
+        add("killswitch", "持久化安全锁 (pf)", "fail", "未初始化 (请先点击「一键初始化环境」或「开启安全锁」)")
 
     # 2. TUN 虚拟网卡与默认路由归属
     rc_rt, rt_out = run_cmd(["route", "-n", "get", "1.1.1.1"])

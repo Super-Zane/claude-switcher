@@ -1,7 +1,8 @@
 #!/bin/bash
-# Claude 安全锁 · macOS 零依赖原生双锁控制台
-# 锁 1 (直连切换锁): 在「全封闭模式(仅走海外TUN)」与「国内直连放行(放行国内，但死锁 Claude ASN/IP 与一切海外)」之间一键切换
-# 锁 2 (持久化硬锁总开关): 代理退出/软件被杀/电脑死机重启后依然生效；仅在确定不用 Claude 时才手动解开并恢复电脑出厂网络
+# Claude 安全锁 · macOS 极简单锁原生控制台
+# 只有一把单锁开关:
+#   - 🔒 开启安全锁: 内核持久化死锁 Claude(ASN+域名IP) 与一切海外直连，放行 Claude 仅通过海外 TUN 运行
+#   - 🔓 关闭安全锁: 放行日常上网，但从系统底层锁死 Claude 进程（永远点不开，点开弹提示）+ 永久物理网卡阻断 Claude（除非卸载本软件）
 DIR="$(cd "$(dirname "$0")" && pwd)"
 CORE="$DIR/claude-guard.sh"
 chmod +x "$CORE" 2>/dev/null || true
@@ -12,16 +13,6 @@ show_alert() {
     osascript - "$title" "$msg" <<'ASEOF' >/dev/null 2>&1
 on run argv
     display dialog (item 2 of argv) with title (item 1 of argv) buttons {"好"} default button "好"
-end run
-ASEOF
-}
-
-confirm_danger() {
-    local title="$1"
-    local msg="$2"
-    osascript - "$title" "$msg" <<'ASEOF' >/dev/null 2>&1
-on run argv
-    display dialog (item 2 of argv) with title (item 1 of argv) with icon caution buttons {"取消（继续保持硬锁）", "我确认不再使用 Claude，解开持久化硬锁"} default button "取消（继续保持硬锁）" cancel button "取消（继续保持硬锁）"
 end run
 ASEOF
 }
@@ -42,40 +33,51 @@ while true; do
     STATUS_OUT=$("$CORE" status 2>/dev/null)
     LOCK_ST=$(printf '%s\n' "$STATUS_OUT" | sed -n 's/^LOCK=//p')
     LOCK_MODE=$(printf '%s\n' "$STATUS_OUT" | sed -n 's/^LOCK_MODE=//p')
+    PROC_LOCKED=$(printf '%s\n' "$STATUS_OUT" | sed -n 's/^PROC_LOCKED=//p')
     BOOT_ST=$(printf '%s\n' "$STATUS_OUT" | sed -n 's/^PERSISTENT_LOCK=//p')
+    STRICT_MODE=$(printf '%s\n' "$STATUS_OUT" | sed -n 's/^STRICT_MODE=//p')
     CUR_NODES=$(printf '%s\n' "$STATUS_OUT" | sed -n 's/^ENTRY_NODES=//p')
     CUR_CC=$(printf '%s\n' "$STATUS_OUT" | sed -n 's/^COUNTRY_TARGET=//p')
     [ "$CUR_NODES" = "未配置" ] && CUR_NODES=""
 
-    if [ "$LOCK_ST" = "on" ] && [ "$LOCK_MODE" = "strict" ]; then
-        BANNER="当前状态：🔒【锁1：全封闭安全模式】+【锁2：持久化硬锁已扣死 (开机自启=${BOOT_ST})】
-说明：物理网卡仅放行代理入口，国内/海外/Claude/IPv6/WebRTC 全部 0ms 阻断。
-代理入口：${CUR_NODES:-未配置} | 目标国家：${CUR_CC:-未配置}"
-    elif [ "$LOCK_ST" = "on" ]; then
-        BANNER="当前状态：🟡【锁1：国内直连放行】+【锁2：持久化硬锁已扣死 (开机自启=${BOOT_ST})】
-说明：国内直连正常可用；Claude(ASN+域名IP) 与一切海外服务依然 0ms 死锁，误点 Claude 也不会泄露！
+    if [ "$LOCK_ST" = "on" ]; then
+        MODE_DESC="国内直连放行 · 海外与Claude死锁"
+        [ "$LOCK_MODE" = "strict" ] && MODE_DESC="全封闭模式（连国内与裸DNS一并封锁）"
+        BANNER="当前状态：🔒 安全锁已开启（Claude 可放心使用）
+保护策略：${MODE_DESC} | 自愈开机守护=${BOOT_ST}
+说明：Claude 只能通过海外 TUN 通信，代理退出/重启/软件被杀均 0ms 零泄露。
 代理入口：${CUR_NODES:-国内中转可留空} | 目标国家：${CUR_CC:-未配置}"
+        PRIMARY_ACTION="🔓 关闭安全锁（日常上网模式 · Claude 将被系统永久锁死，点开弹提示）"
     else
-        BANNER="当前状态：🔓【锁2 已解开 — 电脑处于原生直连状态】
-⚠️ 警告：持久化硬锁未开启！请勿在此状态下启动 Claude 桌面版、网页版或 Claude Code CLI！
-代理入口：${CUR_NODES:-未配置} | 目标国家：${CUR_CC:-未配置}"
+        BANNER="当前状态：🟡 日常上网模式（安全锁未开启 · Claude 已被系统锁死）
+保护状态：Claude 进程已禁用(${PROC_LOCKED}) + 物理网卡永久阻断 Claude + hosts 黑洞
+说明：可正常直连上网；此刻点开 Claude 会弹窗拦截，绝无直连泄露风险！
+代理入口：${CUR_NODES:-国内中转可留空} | 目标国家：${CUR_CC:-未配置}"
+        PRIMARY_ACTION="🔒 开启安全锁（启用防泄露硬锁并解锁 Claude 使用）"
     fi
 
-    CHOICE=$(osascript - "$BANNER" <<'ASEOF' 2>/dev/null
+    if [ "${STRICT_MODE:-0}" = "1" ]; then
+        STRICT_LABEL="⚙️ 切换开锁策略（当前：全封闭模式 → 点击切回放行国内直连）"
+    else
+        STRICT_LABEL="⚙️ 切换开锁策略（当前：放行国内直连 → 点击切为全封闭模式）"
+    fi
+
+    CHOICE=$(osascript - "$BANNER" "$PRIMARY_ACTION" "$STRICT_LABEL" <<'ASEOF' 2>/dev/null
 on run argv
     set p to item 1 of argv
+    set mainBtn to item 2 of argv
+    set strictBtn to item 3 of argv
     set itemsList to {¬
-        "🟡【锁1切换】放行国内直连（但死锁 Claude 与一切海外 · 推荐日常态）", ¬
-        "🔒【锁1切换】全封闭模式（仅走海外 TUN，连国内公网也全封 · 最严工作态）", ¬
-        "⚙️ 一键初始化环境（首次交付：锁时区/地区/英文/关IPv6 + 扣死双锁）", ¬
-        "🛡️ 验收操作系统防火墙与流量拦截日志（pfctl 丢包计数实证）", ¬
+        mainBtn, ¬
+        "🚀 一键初始化环境（首次交付：锁时区/地区/英文/关IPv6 + 开安全锁）", ¬
+        "🛡️ 验收操作系统防火墙、进程锁与丢包日志", ¬
         "🔍 14维度深度体检（IP画像/DNS/WebRTC/TLS/WSS）", ¬
         "📄 导出交机体检报告到桌面", ¬
-        "📝 修改海外代理入口白名单 IP / 域名", ¬
-        "🔓【锁2高危操作】解开持久化硬锁（仅确定不用 Claude 时恢复出厂网络）", ¬
+        "📝 修改代理入口白名单 IP / 域名", ¬
+        strictBtn, ¬
         "退出"¬
     }
-    set picked to choose from list itemsList with title "Claude 双锁安全控制台 · macOS" with prompt p default items {item 1 of itemsList} OK button name "执行" cancel button name "退出"
+    set picked to choose from list itemsList with title "Claude 安全锁控制台 · macOS" with prompt p default items {item 1 of itemsList} OK button name "执行" cancel button name "退出"
     if picked is false then return "退出"
     return item 1 of picked
 end run
@@ -83,20 +85,20 @@ ASEOF
 )
     case "$CHOICE" in
         ""|"退出") exit 0 ;;
-        "🟡"*)
-            OUT=$("$CORE" lock-cn 2>&1)
-            show_alert "锁 1：已切换为「国内直连放行 + 死锁 Claude 与海外」" "$OUT"
-            ;;
         "🔒"*)
-            if [ -z "$CUR_NODES" ]; then
-                NODES=$(ask_input "全封闭模式需填写代理入口" "全封闭模式会连国内公网一并阻断，请先输入第一跳代理入口 IP 或域名（多个用逗号隔开）：" "") || continue
+            if [ "${STRICT_MODE:-0}" = "1" ] && [ -z "$CUR_NODES" ]; then
+                NODES=$(ask_input "全封闭模式需填写代理入口" "当前启用了全封闭模式，请先输入第一跳代理入口 IP 或域名（多个逗号隔开）：" "") || continue
                 [ -z "$NODES" ] && continue
                 "$CORE" set-nodes "$NODES" >/dev/null 2>&1 || true
             fi
-            OUT=$("$CORE" lock-strict 2>&1)
-            show_alert "锁 1：已切换为「全封闭模式（仅海外 TUN）」" "$OUT"
+            OUT=$("$CORE" lock 2>&1)
+            show_alert "🔒 安全锁已开启" "$OUT"
             ;;
-        "⚙️"*)
+        "🔓"*)
+            OUT=$("$CORE" unlock 2>&1)
+            show_alert "🟡 已切换为日常模式（Claude 已锁死）" "$OUT"
+            ;;
+        "🚀"*)
             NODES=$(ask_input "一键初始化环境" "请确认代理客户端（Stash/小火箭/Clash）已开启「全局 + TUN」。
 
 请输入第一跳代理入口 IP 或域名（若链式代理第一跳在国内中转机可留空；直连海外 VPS 请填 IP，多个逗号隔开）：" "$CUR_NODES") || continue
@@ -105,7 +107,7 @@ ASEOF
             ;;
         "🛡️"*)
             OUT=$("$CORE" verify-firewall 2>&1)
-            show_alert "操作系统防火墙与流量拦截日志验收" "$OUT"
+            show_alert "操作系统防火墙、进程锁与日志验收" "$OUT"
             ;;
         "🔍"*)
             OUT=$("$CORE" check 2>&1)
@@ -119,26 +121,20 @@ ASEOF
             NODES=$(ask_input "修改代理入口白名单" "请输入第一跳代理入口 IP 或域名（多个用逗号隔开；若第一跳为国内中转可留空）：" "$CUR_NODES") || continue
             OUT=$("$CORE" set-nodes "$NODES" 2>&1)
             if [ "$LOCK_ST" = "on" ]; then
-                if [ "$LOCK_MODE" = "strict" ]; then
-                    LOCK_OUT=$("$CORE" lock-strict 2>&1)
-                else
-                    LOCK_OUT=$("$CORE" lock-cn 2>&1)
-                fi
+                LOCK_OUT=$("$CORE" lock 2>&1)
                 OUT="${OUT}
 ${LOCK_OUT}"
             fi
             show_alert "入口白名单已更新" "$OUT"
             ;;
-        "🔓"*)
-            if confirm_danger "⚠️ 高危确认：解开锁 2（持久化硬锁）" "确定要解开【锁 2：持久化硬锁】并恢复电脑原生直连网络吗？
-
-⚠️ 重要安全警告：
-1. 软件将先自动关闭正在运行的 Claude 桌面版与 Claude Code CLI；
-2. 解开此锁后，电脑将完全恢复到未使用本软件时的直连状态；
-3. 解开后【千万不要】启动 Claude 桌面版、网页版或 Claude Code CLI 的任何服务，否则将立即暴露本地真实 IP！"; then
-                OUT=$("$CORE" unlock-all 2>&1)
-                show_alert "锁 2 已解开（电脑已恢复原生直连）" "$OUT"
+        "⚙️"*)
+            OUT=$("$CORE" toggle-strict 2>&1)
+            if [ "$LOCK_ST" = "on" ]; then
+                LOCK_OUT=$("$CORE" lock 2>&1)
+                OUT="${OUT}
+${LOCK_OUT}"
             fi
+            show_alert "开锁策略已更新" "$OUT"
             ;;
     esac
 done
