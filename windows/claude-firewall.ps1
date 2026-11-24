@@ -24,10 +24,10 @@ $ANTHROPIC_DOMAINS = @('claude.ai', 'api.anthropic.com', 'claudeusercontent.com'
 # 排除 127.0.0.0/8 (本机回环代理)、172.18.0.0/15 (v2rayN/sing-box TUN)、198.18.0.0/15 (Clash Fake-IP TUN)
 # 所有 Wi-Fi / 有线 / iPhone 热点 (172.20.10.x) / Android 热点 (192.168.x.x) 物理接口 IP 均落在此区间内
 $NON_TUN_LOCAL_V4 = @(
-    '0.0.0.0-126.255.255.255',
+    '1.0.0.0-126.255.255.255',
     '128.0.0.0-172.17.255.255',
     '172.20.0.0-198.17.255.255',
-    '198.20.0.0-255.255.255.255'
+    '198.20.0.0-223.255.255.255'
 )
 
 # 排除 Loopback / RFC1918 私网 / Link-Local 后的公网 IPv4 范围 (用于 Claude 进程级非隧道公网封锁)
