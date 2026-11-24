@@ -251,15 +251,16 @@ def run_audit(args):
         except OSError:
             pass
     lock_on = lock_mode in ("cn", "strict")
-    if lock_mode in ("cn", "strict") and boot_persist:
-        mode_desc = "全封闭模式" if lock_mode == "strict" else "锁Claude与海外/放行国内"
-        add("killswitch", "持久化安全锁 (pf)", "ok", f"已开启并注册开机守护 ({mode_desc}; 白名单入口={entry_nodes or '国内中转'})")
+    if lock_mode == "strict" and boot_persist:
+        add("killswitch", "持久化安全锁 (pf)", "ok", f"一级锁已开启 · 100%流量只走TUN (KeepAlive自愈守护在线; 入口={entry_nodes or '自动探测'})")
+    elif lock_mode == "cn":
+        add("killswitch", "持久化安全锁 (pf)", "warn", "一级锁已关闭 · 国内白名单直连态 (海外与Claude遥测已死锁，用Claude前请先开一级锁)")
     elif lock_mode == "standby":
-        add("killswitch", "持久化安全锁 (pf)", "warn", "当前为日常上网模式 (Claude 进程与遥测网络已系统级死锁，如需使用 Claude 请先点「开启安全锁」)")
-    elif lock_mode in ("cn", "strict"):
-        add("killswitch", "持久化安全锁 (pf)", "warn", "pf 锚点已开启但缺少自愈开机守护，建议在控制台重新点一次「开启安全锁」")
+        add("killswitch", "持久化安全锁 (pf)", "warn", "二级放宽锁已打开 (严禁触碰任何Claude服务与邮件链接！底层进程与遥测黑洞仍在保护中)")
+    elif lock_mode == "strict":
+        add("killswitch", "持久化安全锁 (pf)", "warn", "一级锁已开启但缺少自愈守护，建议重新点击一次「开启安全锁」")
     else:
-        add("killswitch", "持久化安全锁 (pf)", "fail", "未初始化 (请先点击「一键初始化环境」或「开启安全锁」)")
+        add("killswitch", "持久化安全锁 (pf)", "fail", "尚未初始化 (请先开启代理「全局+TUN」，再点击「一键初始化」)")
 
     # 2. TUN 虚拟网卡与默认路由归属
     rc_rt, rt_out = run_cmd(["route", "-n", "get", "1.1.1.1"])

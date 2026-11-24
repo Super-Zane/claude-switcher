@@ -1,16 +1,13 @@
 #!/bin/bash
-# Claude 持久化安全锁 · macOS 极简单锁核心引擎 (永久进程锁 + 永久 Claude 网络硬锁)
-# 核心铁律 (除非运行「卸载.command」，否则永久生效):
-#   1. 开启安全锁 (lock):
-#        - 内核 pf 持久化死锁 Claude(ASN+生态IP) + 一切海外公网 + 公网 IPv6 + STUN (默认放行国内直连; 可选全封闭模式连国内与裸DNS一并封)
-#        - 放行 Claude Desktop 与 CLI 启动 (此时 Claude 只能走海外 TUN，TUN 以外 0 字节能出去)
-#   2. 关闭安全锁 (unlock · 日常模式):
-#        - 放行日常普通上网;
-#        - 系统级无损死锁 Claude.app (原应用原子藏匿 + chmod a-x + 原位同图标弹窗拦截器) 与 claude CLI (点开立刻弹窗提示先开安全锁!)
-#        - 写入 /etc/hosts Claude 域名黑洞 (连浏览器手抖点网页版的本地 DNS 查询也直接秒拒)
-#        - pf 内核防火墙永久保留 Claude ASN/生态IP 物理网卡 0ms DROP (mode=standby)，代理退出/重启/软件被杀均持续生效
-#   3. 彻底卸载 (uninstall-all，仅由卸载脚本调用):
-#        - 完整还原真实 Claude.app 与 CLI、彻底清理 pf 锚点、自愈开机守护与 hosts 托管块
+# Claude 持久化安全锁 · macOS 三态防呆核心引擎 (v2.2)
+# 完美适配「代理客户端默认开全局 + TUN」工作流:
+#   - 状态 1 [lock / strict]:  一级安全锁开启 (Claude 工作态) -> 一切公网流量 100% 只走代理 TUN，放行 Claude 启动
+#   - 状态 2 [unlock / cn]:    一级安全锁关闭 (国内网络态)   -> 先退出 Claude 并锁死进程; 放行国内 CN 段，但持续死锁一切海外与 Claude 遥测
+#   - 状态 3 [relax / standby]: 二级放宽锁打开 (防国内误伤态) -> 放宽普通公网防未收录国内 IP 误伤，但永久焊死 Claude 全版本进程锁 + 34 个主站/遥测/邮件链接黑洞 + ASN 拦截
+#   - 彻底卸载 [uninstall-all]: 仅在卸载软件时解除永久进程锁与遥测硬锁，恢复出厂状态
+#   - 免维护全版本自愈守护 (com.claude-guard.pfboot, KeepAlive):
+#       * 运行时若 pf 规则或 hosts 黑洞被其他 VPN/软件或系统更新冲掉，自动秒级补回;
+#       * 非 lock 状态下，若用户安装/升级了新版 Claude.app 或通过 npm/npx/bun 启动新版 claude CLI，自动接管锁死并强杀弹窗，永久免维护！
 
 set -u
 export LC_ALL=en_US.UTF-8
@@ -21,12 +18,12 @@ PF_ANCHOR_NAME="${CLAUDE_GUARD_ANCHOR:-com.claude-guard}"
 PF_CONF="${CLAUDE_GUARD_PF_CONF:-/etc/pf.conf}"
 PF_ANCHOR_FILE="${CLAUDE_GUARD_ANCHOR_FILE:-/etc/pf.anchors/${PF_ANCHOR_NAME}}"
 PF_CN_FILE="${CLAUDE_GUARD_CN_FILE:-/etc/pf.anchors/${PF_ANCHOR_NAME}.cn.txt}"
+PF_STATE_FILE="${CLAUDE_GUARD_STATE_FILE:-/etc/pf.anchors/${PF_ANCHOR_NAME}.state}"
 PF_BOOT_LABEL="com.claude-guard.pfboot"
 PF_BOOT_PLIST="${CLAUDE_GUARD_BOOT_PLIST:-/Library/LaunchDaemons/${PF_BOOT_LABEL}.plist}"
-PF_BOOT_SCRIPT="${CLAUDE_GUARD_BOOT_SCRIPT:-/etc/pf.anchors/${PF_ANCHOR_NAME}.boot.sh}"
+PF_BOOT_SCRIPT="${CLAUDE_GUARD_BOOT_SCRIPT:-/etc/pf.anchors/${PF_ANCHOR_NAME}.daemon.sh}"
 HOSTS_FILE="${CLAUDE_GUARD_HOSTS:-/etc/hosts}"
 
-# 支持测试注入自定义 Claude.app 路径与 CLI 搜索路径
 CLAUDE_APP_PATH="${CLAUDE_GUARD_CLAUDE_APP:-/Applications/Claude.app}"
 CLAUDE_HIDDEN_APP="${CLAUDE_GUARD_HIDDEN_APP:-$(dirname "$CLAUDE_APP_PATH")/.Claude-Locked.app}"
 CLAUDE_BLOCKER_MARK=".claude-guard-blocker"
@@ -34,8 +31,8 @@ CLI_LOCK_STATE="${CLAUDE_GUARD_CLI_STATE:-$APP_DIR/locked-cli-paths.txt}"
 
 ANTHROPIC_ASN_V4="160.79.104.0/21"
 ANTHROPIC_ASN_V6="2607:6bc0::/48"
-# 完整覆盖 Claude 主服务 + API/CDN + MCP + 专属遥测/埋点/灰度开关/Sentry(o1158394) 崩溃上报域名 (25 个)
-ANTHROPIC_DOMAINS="claude.ai www.claude.ai a-cdn.claude.ai a-api.claude.ai downloads.claude.ai claude.com www.claude.com platform.claude.com claudemcpclient.com api.anthropic.com anthropic.com www.anthropic.com console.anthropic.com auth.anthropic.com mcp-proxy.anthropic.com claudeusercontent.com statsig.anthropic.com events.anthropic.com telemetry.anthropic.com o1158394.ingest.sentry.io o1158394.ingest.us.sentry.io statsigapi.net events.statsigapi.net featuregates.org prodregistryv2.org"
+# 34 个全系域名: 主站 + API/CDN + MCP + 邮件点击跳转链接 + Statsig/Sentry(o1158394)/Datadog 遥测上报端点
+ANTHROPIC_DOMAINS="claude.ai www.claude.ai a-cdn.claude.ai a-api.claude.ai downloads.claude.ai links.claude.ai email.claude.ai claude.com www.claude.com platform.claude.com claudemcpclient.com api.anthropic.com anthropic.com www.anthropic.com console.anthropic.com auth.anthropic.com mcp-proxy.anthropic.com docs.anthropic.com support.anthropic.com status.anthropic.com mail.anthropic.com e.anthropic.com claudeusercontent.com statsig.anthropic.com events.anthropic.com telemetry.anthropic.com o1158394.ingest.sentry.io o1158394.ingest.us.sentry.io statsigapi.net events.statsigapi.net featuregates.org prodregistryv2.org browser-intake-datadoghq.com http-intake.logs.datadoghq.com"
 
 PF_BEGIN="# BEGIN claude-guard-pf"
 PF_END="# END claude-guard-pf"
@@ -44,13 +41,11 @@ HOSTS_END="# END claude-guard-hosts"
 
 mkdir -p "$APP_DIR"
 
-# ---- 默认配置 ----
-ENTRY_NODES=""       # 入口节点 IP 或域名，逗号分隔（链式代理第一跳在国内中转机可留空）
-COUNTRY_TARGET=""    # 期望出口国家码，如 US / JP / SG
-TZ_TARGET=""         # 期望 IANA 时区，如 America/New_York
-LOCALE_TARGET=""     # 期望地区格式，如 en_US
-STRICT_MODE="0"      # 0=开启安全锁时放行国内直连(但死锁Claude与一切海外); 1=开启安全锁时连国内公网与物理裸DNS一并全封
-LOCK_STATE="standby" # active(安全锁开启·Claude可用) | standby(安全锁关闭·Claude系统级死锁)
+ENTRY_NODES=""
+COUNTRY_TARGET=""
+TZ_TARGET=""
+LOCALE_TARGET=""
+LOCK_STATE="off"     # active(一级锁开·全走TUN) | cn(一级锁关·国内白名单直连) | relax(二级放宽锁开·仅锁死Claude与遥测)
 
 load_cfg() {
     [ -f "$CFG_FILE" ] && source "$CFG_FILE" 2>/dev/null || true
@@ -63,7 +58,6 @@ ENTRY_NODES="${ENTRY_NODES}"
 COUNTRY_TARGET="${COUNTRY_TARGET}"
 TZ_TARGET="${TZ_TARGET}"
 LOCALE_TARGET="${LOCALE_TARGET}"
-STRICT_MODE="${STRICT_MODE}"
 LOCK_STATE="${LOCK_STATE}"
 EOF
     chmod 600 "$CFG_FILE" 2>/dev/null || true
@@ -86,6 +80,26 @@ default_locale_for() {
         KR) echo ko_KR ;; AU) echo en_AU ;; CA) echo en_CA ;; MY) echo ms_MY ;;
         *) echo en_US ;;
     esac
+}
+
+# 自动探测当前活跃代理进程 (Stash / Shadowrocket / Clash / Mihomo / sing-box / xray / v2ray) 正在连接的远端第一跳服务器 IPv4
+auto_detect_proxy_Upstream_ips() {
+    lsof -nP -iTCP -sTCP:ESTABLISHED 2>/dev/null | awk '
+        BEGIN { IGNORECASE = 1 }
+        $1 ~ /(stash|shadowrocket|verge|mihomo|clash|sing-box|v2ray|xray|hysteria|tuic|brook|naive)/ {
+            # 格式: 192.168.1.5:54321->203.0.113.10:443
+            n = split($9, arr, "->")
+            if (n == 2) {
+                split(arr[2], hp, ":")
+                ip = hp[1]
+                if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ &&
+                    ip !~ /^(127\.|10\.|192\.168\.|169\.254\.|198\.18\.|198\.19\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)/ &&
+                    ip !~ /^172\.(1[6-9]|2[0-9]|3[0-1])\./) {
+                    print ip
+                }
+            }
+        }
+    ' | sort -u | paste -sd ',' - | sed 's/,/, /g'
 }
 
 resolve_entries() {
@@ -165,9 +179,9 @@ items, seen = [asn_v4], {asn_v4}
 for dom in domains_s.split():
     try:
         out = subprocess.check_output(
-            ["curl", "-s", "--max-time", "4", "-H", "accept: application/dns-json",
+            ["curl", "-s", "--max-time", "3", "-H", "accept: application/dns-json",
              f"https://cloudflare-dns.com/dns-query?name={dom}&type=A"],
-            stderr=subprocess.DEVNULL, text=True, timeout=5
+            stderr=subprocess.DEVNULL, text=True, timeout=4
         )
         for ans in (json.loads(out).get("Answer") or []):
             ip_s = str(ans.get("data", "")).strip()
@@ -197,10 +211,10 @@ find_cn_list_src() {
     return 1
 }
 
-# 生成 pf 锚点规则:
-#   mode=cn      (安全锁开启 · 默认): 放行国内 CN 段 + 局域网 + 入口 + TUN; 0ms 死锁 Claude(ASN+域名IP) + 一切海外 + 公网IPv6 + STUN
-#   mode=strict  (安全锁开启 · 全封): 仅放行入口 + 局域网(非DNS) + DHCP + TUN; 0ms 死锁全部公网(含国内+海外+Claude+IPv6+STUN)
-#   mode=standby (安全锁关闭 · 常驻): 日常上网正常放行; 但物理网卡永久 0ms 死锁 Claude ASN 与生态域名 IP (IPv4 + IPv6)，绝不让 Claude 从 TUN 以外跑出 1 字节
+# 生成三态 pf 锚点规则:
+#   mode=strict  (状态1 · 一级安全锁开启): 一切公网流量 100% 只走代理 TUN! 物理网卡仅放行代理入口 + 局域网(非DNS) + DHCP + TUN
+#   mode=cn      (状态2 · 一级安全锁关闭): 反向规则放行国内 7,456 段 + 局域网; 持续 0ms 死锁一切海外 IP + Claude/全系遥测 + IPv6 + STUN
+#   mode=standby (状态3 · 二级放宽锁打开): 放宽普通公网防国内误伤; 但物理网卡永久 0ms 死锁 Claude ASN 与 34 个主站/遥测/邮件追踪 IP
 render_pf_rules() {
     local ip_csv="${1:-}"
     local tun_if="${2:-}"
@@ -208,10 +222,10 @@ render_pf_rules() {
     local allow_lan_dns="${4:-0}"
     local cn_file="${5:-$PF_CN_FILE}"
     local claude_v4="${6:-$ANTHROPIC_ASN_V4}"
-    local lock_mode="${7:-cn}"
+    local lock_mode="${7:-strict}"
 
     if [ "$lock_mode" = "strict" ] && [ -z "$ip_csv" ]; then
-        echo "FAIL:全封闭模式必须先配置代理入口节点 IP/域名，否则会无法连接代理" >&2
+        echo "FAIL:开启安全锁(一切流量只走TUN)需要第一跳代理入口 IP/域名，请先开启代理自动识别或在输入框填入第一跳节点 IP" >&2
         return 1
     fi
 
@@ -225,12 +239,11 @@ render_pf_rules() {
 
     if [ "$lock_mode" = "standby" ]; then
         cat <<EOF
-# Claude 永久底层防线 (pf Anchor: ${PF_ANCHOR_NAME}, mode=standby)
-# 说明: 安全锁处于关闭(日常上网)状态，但物理网卡永久死锁 Claude/Anthropic 官方 ASN 与生态 IP (除非彻底卸载)
+# Claude 二级放宽锁底层防线 (pf Anchor: ${PF_ANCHOR_NAME}, mode=standby)
+# 说明: 普通公网已放宽防误伤，但物理网卡永久 0ms 死锁 Claude/Anthropic 官方 ASN 与 34 个遥测/邮件链接 IP (除非彻底卸载)
 table <claude_blocked_v4> persist { ${claude_v4} }
 table <claude_blocked_v6> persist { ${ANTHROPIC_ASN_V6} }
 
-# 1. 仅允许回环与代理 TUN 虚拟网段访问 (严禁物理网卡发往 Claude 哪怕 1 个字节)
 pass out quick on lo0 all
 pass out quick inet from { ${tun_sources} } to any
 EOF
@@ -238,8 +251,6 @@ EOF
             echo "pass out quick on ${tun_if} all"
         fi
         cat <<EOF
-
-# 2. 物理网卡永久死锁 Claude/Anthropic (IPv4 + IPv6) 并记 pflog0 日志
 block drop out log quick inet to <claude_blocked_v4>
 block drop out log quick inet6 to <claude_blocked_v6>
 EOF
@@ -248,7 +259,6 @@ EOF
 
     cat <<EOF
 # Claude 持久化安全锁 (pf Anchor: ${PF_ANCHOR_NAME}, mode=${lock_mode})
-# 策略: 代理退出/软件被杀/系统死机重启后依然内核生效
 table <claude_blocked_v4> persist { ${claude_v4} }
 table <claude_blocked_v6> persist { ${ANTHROPIC_ASN_V6} }
 table <claude_guard_lan> const { 127.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }
@@ -266,28 +276,27 @@ EOF
 
     cat <<EOF
 
-# 0. 封死所有物理网卡公网 IPv6 出站并记录内核丢包日志 (根治运营商手机热点强推 IPv6 泄露)
+# 0. 封死所有物理网卡公网 IPv6 出站并记日志
 pass out quick on lo0 inet6 all
 pass out quick inet6 to fe80::/10
 block drop out log quick inet6 to <claude_blocked_v6>
 block drop out log quick inet6 all
 
-# 1. 放行本机回环 + DHCP + 代理 TUN 虚拟网段 (开全局+TUN 时 Claude 与海外服务全速走隧道)
+# 1. 放行回环 + DHCP + 代理 TUN 虚拟网段
 pass out quick on lo0 all
 pass out quick inet proto udp from any port 68 to any port 67
 pass out quick inet from { ${tun_sources} } to any
 EOF
     if [ -n "$tun_if" ]; then
-        echo "# 1b. 同步放行当前承载默认路由的代理接口"
         echo "pass out quick on ${tun_if} all"
     fi
 
     cat <<EOF
 
-# 2. 放行白名单代理入口节点 IP (第一跳海外 VPS / 链式代理入口; 国内中转机在 cn 模式下也自动放行)
+# 2. 放行白名单第一跳代理入口节点 IP
 pass out quick inet to <claude_guard_entries>
 
-# 3. 物理网卡最高优先级硬锁: 阻断 Claude/Anthropic 官方 ASN 与生态域名 IP (全协议)，以及非隧道 STUN/WebRTC UDP 端口
+# 3. 物理网卡最高优先级硬锁: 死锁 Claude/Anthropic ASN 与全系遥测 IP，以及非隧道 STUN/WebRTC UDP
 block drop out log quick inet to <claude_blocked_v4>
 block drop out log quick inet proto udp to any port { 3478, 5349, 19302 }
 EOF
@@ -296,24 +305,22 @@ EOF
         if [ "$allow_lan_dns" != "1" ]; then
             cat <<EOF
 
-# 4. 全封闭模式: 阻断物理网卡向局域网路由器/运营商发送裸 DNS 查询 (入口域名由本机 hosts 托管)
+# 4. 一级安全锁开启(全走TUN): 阻断物理网卡裸 DNS 53 查询
 block drop out log quick inet proto { tcp, udp } to <claude_guard_lan> port 53
 EOF
         fi
         cat <<EOF
 
-# 5. 仅放行局域网常规通信，其余全部物理公网(含国内+海外) 0ms DROP 并记 pflog0 日志
+# 5. 仅放行局域网保留段，其余一切公网(国内+海外) 0ms DROP，强制 100% 流量只走代理 TUN!
 pass out quick inet to <claude_guard_lan>
 block drop out log quick inet all
 EOF
     else
         cat <<EOF
 
-# 4. 国内直连放行模式: 放行局域网与中国大陆直连服务
+# 4. 一级安全锁关闭(国内白名单直连): 放行局域网与中国大陆 7,456 条 IP 段，但死锁一切海外与 Claude 遥测
 pass out quick inet to <claude_guard_lan>
 pass out quick inet to <claude_guard_cn>
-
-# 5. 默认兜底硬锁: 阻断一切其他海外公网服务直连并记录 pflog0 拦截日志
 block drop out log quick inet all
 EOF
     fi
@@ -357,7 +364,6 @@ remove_managed_block() {
     write_managed_block "$file" "$begin_m" "$end_m" ""
 }
 
-# 生成日常模式下的 Claude 域名本地黑洞块 (连浏览器手抖点网页版都不会发本地 DNS 查询!)
 render_claude_hosts_blackhole() {
     local d
     for d in $ANTHROPIC_DOMAINS; do
@@ -365,24 +371,57 @@ render_claude_hosts_blackhole() {
     done
 }
 
-# ---- 系统级无损进程硬锁 (解锁状态下 Claude Desktop & CLI 永远点不开，点开立刻弹中文提示!) ----
+# 生成针对本机真实网络服务名的桌面《断网急救.txt》(修复差异项 #4)
+write_emergency_guide_to_desktop() {
+    local target_file="${1:-$HOME/Desktop/断网急救.txt}"
+    local svcs_cmds="" svc
+    while IFS= read -r svc; do
+        [ -n "$svc" ] || continue
+        svcs_cmds="${svcs_cmds}  networksetup -setwebproxystate \"${svc}\" off && networksetup -setsecurewebproxystate \"${svc}\" off && networksetup -setsocksfirewallproxystate \"${svc}\" off\n"
+    done < <(networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*')
+    [ -n "$svcs_cmds" ] || svcs_cmds='  networksetup -setwebproxystate "Wi-Fi" off && networksetup -setsecurewebproxystate "Wi-Fi" off'
+
+    mkdir -p "$(dirname "$target_file")" 2>/dev/null || true
+    cat > "$target_file" <<EMGEOF
+====================================================================
+  Claude 安全锁 · 本机专属断网急救指南（手机拍照留存，断网照抄即通）
+====================================================================
+
+【为什么会断网？】
+开启一级安全锁后，系统强制「一切公网流量 100% 只走代理 TUN」。
+若代理客户端退出了、未开启「全局 + TUN」、或节点挂了，外网会被防火墙 0ms 拦截保护账号不漏 IP。
+
+【第 1 步（最简单）】
+1. 打开你的代理客户端（Stash / 小火箭 / Clash Verge / v2rayN），确认开启「全局 + TUN」，等 10 秒；
+2. 若当前不想用代理，直接打开「Claude安全锁.app」点击「关闭安全锁」切换回国内网络（Claude 仍保持锁死不泄露）。
+
+【第 2 步（若国内部分偏门网站被误拦）】
+在「Claude安全锁.app」下方打开「二级放宽锁」（注意：打开期间严禁点击任何 Claude 服务及 Claude 邮件链接！）。
+
+【第 3 步（终端终极急救命令 —— 复制粘贴到「终端」回车）】
+1) 一键彻底卸载并解除全部防火墙规则：
+  sudo launchctl bootout system/${PF_BOOT_LABEL} 2>/dev/null; sudo pfctl -a ${PF_ANCHOR_NAME} -F all 2>/dev/null; sudo rm -f ${PF_ANCHOR_FILE} ${PF_BOOT_PLIST} ${PF_BOOT_SCRIPT}; sudo pfctl -f /etc/pf.conf
+
+2) 清理代理客户端异常退出残留的系统代理（已匹配你这台电脑的实际网卡名）：
+$(printf '%b' "$svcs_cmds")
+====================================================================
+EMGEOF
+}
+
+# ---- 系统级无损进程硬锁 (支持未来任意新版自动接管) ----
 lock_claude_apps_root() {
     local console_app="/Applications/Claude安全锁.app"
-    # 1. 锁定 Claude Desktop (幂等、零破坏原应用代码签名)
     if [ -d "$CLAUDE_APP_PATH" ] && [ ! -f "$CLAUDE_APP_PATH/$CLAUDE_BLOCKER_MARK" ]; then
         if [ -d "$CLAUDE_HIDDEN_APP" ]; then
-            # 保护: 若已存在隐藏原版(极罕见重装场景)，先清理旧隐藏副本再藏匿新版
             chmod -R u+w "$CLAUDE_HIDDEN_APP" 2>/dev/null || true
             rm -rf "$CLAUDE_HIDDEN_APP" 2>/dev/null || true
         fi
-        # 先去掉真实二进制执行位 (内核 execve 直接 EACCES，绝不破坏文件内容与签名)
         if [ -f "$CLAUDE_APP_PATH/Contents/MacOS/Claude" ]; then
             chmod a-x "$CLAUDE_APP_PATH/Contents/MacOS/Claude" 2>/dev/null || true
         fi
         mv "$CLAUDE_APP_PATH" "$CLAUDE_HIDDEN_APP" || return 1
     fi
 
-    # 只要真实原版已被藏匿 (或原位尚未创建占位器且存在隐藏原版)，就在原位部署带原图标的弹窗拦截器
     if [ -d "$CLAUDE_HIDDEN_APP" ] && [ ! -f "$CLAUDE_APP_PATH/$CLAUDE_BLOCKER_MARK" ]; then
         rm -rf "$CLAUDE_APP_PATH" 2>/dev/null || true
         mkdir -p "$CLAUDE_APP_PATH/Contents/MacOS" "$CLAUDE_APP_PATH/Contents/Resources"
@@ -418,11 +457,11 @@ BTN=\$(/usr/bin/osascript <<'ASEOF' 2>/dev/null
 try
     set r to display dialog "🔒 Claude 安全锁当前未开启，系统已禁止启动 Claude！
 
-为防止暴露本地直连 IP，在关闭安全锁期间 Claude 已被系统从底层锁死。
+为防止暴露国内直连 IP 或向遥测服务器上报导致封号，在未开启一级安全锁期间 Claude 已被系统从底层锁死。
 
 请按以下步骤操作：
-1. 先打开代理客户端并确认已开启「全局 + TUN」；
-2. 打开「Claude安全锁」点击「🔒 开启安全锁」后再使用 Claude。" with title "⚠️ 已拦截 Claude 启动（防直连泄露）" with icon stop buttons {"我知道了", "打开 Claude安全锁"} default button "打开 Claude安全锁"
+1. 先打开代理客户端并开启「全局 + TUN」；
+2. 打开「Claude安全锁」点击「开启安全锁」后再使用 Claude。" with title "⚠️ 已拦截 Claude 启动（防封号保护）" with icon stop buttons {"我知道了", "打开 Claude安全锁"} default button "打开 Claude安全锁"
     return button returned of r
 on error
     return "我知道了"
@@ -439,7 +478,7 @@ BLOCKEREOF
         /usr/bin/xattr -dr com.apple.quarantine "$CLAUDE_APP_PATH" 2>/dev/null || true
     fi
 
-    # 2. 锁定常见路径的 claude CLI (原子藏匿 + 终端/弹窗双重提醒)
+    # 扫描全局与所有常见包管理器路径下的 claude CLI (含 Homebrew / npm / Volta / fnm / ~/.local/bin)
     local cand real_cli
     for cand in /usr/local/bin/claude /opt/homebrew/bin/claude "${CLAUDE_GUARD_EXTRA_CLI:-}"; do
         [ -n "$cand" ] || continue
@@ -454,10 +493,10 @@ BLOCKEREOF
 echo "" >&2
 echo "================================================================" >&2
 echo "  🔒 [已拦截] Claude 安全锁未开启，已禁止启动 Claude Code CLI！" >&2
-echo "  请先开启代理（全局+TUN），并在「Claude安全锁」中开启安全锁。" >&2
+echo "  请先开启代理（全局+TUN），并在「Claude安全锁」中开启一级安全锁。" >&2
 echo "================================================================" >&2
 echo "" >&2
-/usr/bin/osascript -e 'display dialog "🔒 安全锁未开启，已禁止启动 Claude Code CLI！\n\n请先开启代理（全局+TUN）并在「Claude安全锁」中开启安全锁。" with title "⚠️ 已拦截 Claude 启动" with icon stop buttons {"我知道了"} default button "我知道了"' >/dev/null 2>&1 &
+/usr/bin/osascript -e 'display dialog "🔒 安全锁未开启，已禁止启动 Claude Code CLI！\n\n请先开启代理（全局+TUN）并在「Claude安全锁」中开启一级安全锁。" with title "⚠️ 已拦截 Claude 启动" with icon stop buttons {"我知道了"} default button "我知道了"' >/dev/null 2>&1 &
 exit 1
 CLIEOF
             chmod 755 "$cand" 2>/dev/null || true
@@ -469,7 +508,6 @@ CLIEOF
 }
 
 unlock_claude_apps_root() {
-    # 1. 还原真实 Claude Desktop (零破坏原签名)
     if [ -d "$CLAUDE_HIDDEN_APP" ]; then
         if [ -f "$CLAUDE_APP_PATH/$CLAUDE_BLOCKER_MARK" ] || [ ! -e "$CLAUDE_APP_PATH" ]; then
             rm -rf "$CLAUDE_APP_PATH" 2>/dev/null || true
@@ -480,7 +518,6 @@ unlock_claude_apps_root() {
         chmod a+x "$CLAUDE_APP_PATH/Contents/MacOS/Claude" 2>/dev/null || true
     fi
 
-    # 2. 还原所有被锁定的 claude CLI
     local cand real_cli
     for cand in /usr/local/bin/claude /opt/homebrew/bin/claude "${CLAUDE_GUARD_EXTRA_CLI:-}"; do
         [ -n "$cand" ] || continue
@@ -495,30 +532,78 @@ unlock_claude_apps_root() {
     return 0
 }
 
-# 安装开机自愈 LaunchDaemon: 即使 macOS 系统大版本更新重置 /etc/pf.conf，开机也会自动重新注入锚点并激活 pf
+# 安装 KeepAlive 常驻全版本自愈守护进程:
+#   1) 每 5 秒巡检: 在非 active 状态下，若用户更新/重装了未来新版 Claude.app 或用 npx/bunx/nvm 启动任何新版 claude-code，立即强杀并自动接管锁死 (永久免维护!)
+#   2) 每 30 秒巡检: 若 pf 锚点规则或 /etc/hosts 遥测黑洞被第三方 VPN/安全软件清掉或被系统升级重置，自动秒级补回!
 install_pf_boot_daemon_root() {
+    local mode="$1"
+    local self_path
+    self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     mkdir -p "$(dirname "$PF_BOOT_SCRIPT")" "$(dirname "$PF_BOOT_PLIST")" 2>/dev/null || true
+    echo "$mode" > "$PF_STATE_FILE"
+    chmod 644 "$PF_STATE_FILE" 2>/dev/null || true
+
     cat > "$PF_BOOT_SCRIPT" <<BOOTEOF
-#!/bin/sh
+#!/bin/bash
 PF_CONF="${PF_CONF}"
 ANCHOR_NAME="${PF_ANCHOR_NAME}"
 ANCHOR_FILE="${PF_ANCHOR_FILE}"
-if [ -f "\$ANCHOR_FILE" ]; then
-    NEED_RELOAD=0
-    if ! grep -Fq "anchor \"\${ANCHOR_NAME}\"" "\$PF_CONF" 2>/dev/null; then
-        printf '\n# BEGIN claude-guard-pf\nanchor "%s"\nload anchor "%s" from "%s"\n# END claude-guard-pf\n' "\$ANCHOR_NAME" "\$ANCHOR_NAME" "\$ANCHOR_FILE" >> "\$PF_CONF"
-        NEED_RELOAD=1
+STATE_FILE="${PF_STATE_FILE}"
+HOSTS_FILE="${HOSTS_FILE}"
+CLAUDE_APP="${CLAUDE_APP_PATH}"
+BLOCKER_MARK="${CLAUDE_BLOCKER_MARK}"
+GUARD_SH="${self_path}"
+
+tick=0
+while true; do
+    cur_mode=\$(cat "\$STATE_FILE" 2>/dev/null || echo "strict")
+
+    # A. 非一级开锁状态下: 全版本进程守卫 (适配未来任意新版 Claude.app / npx / nvm / bunx CLI)
+    if [ "\$cur_mode" != "strict" ]; then
+        # 1. 若发现任意真实 Claude Desktop / Helper 或任何 @anthropic-ai/claude-code 进程偷跑，立即 SIGKILL 并弹窗
+        killed=0
+        if pgrep -f '/Claude\.app/Contents/MacOS/Claude ' >/dev/null 2>&1 || pgrep -f 'Claude Helper' >/dev/null 2>&1; then
+            pkill -9 -f 'Claude Helper' 2>/dev/null || true
+            pkill -9 -f '/\.Claude-Locked\.app/' 2>/dev/null || true
+            killed=1
+        fi
+        cli_pids=\$(ps -axo pid=,comm=,args= | awk '
+            \$2 !~ /claude-guard/ && (\$2 ~ /(^|\/)(claude|claude\.exe)\$/ || \$0 ~ /@anthropic-ai\/claude-code/) && \$0 !~ /CLAUDE_GUARD_CLI_BLOCKER/ { print \$1 }
+        ')
+        if [ -n "\$cli_pids" ]; then
+            kill -9 \$cli_pids 2>/dev/null || true
+            killed=1
+        fi
+        # 2. 若用户刚覆盖安装了新版 Claude.app (无 blocker 标记)，自动调用无损接管锁死!
+        if [ -d "\$CLAUDE_APP" ] && [ ! -f "\$CLAUDE_APP/\$BLOCKER_MARK" ] && [ -x "\$GUARD_SH" ]; then
+            CLAUDE_GUARD_CLAUDE_APP="\$CLAUDE_APP" /bin/bash "\$GUARD_SH" _root-relock-apps >/dev/null 2>&1 || true
+        fi
     fi
-    if ! /sbin/pfctl -s info 2>/dev/null | grep -qi 'Status: Enabled'; then
-        NEED_RELOAD=1
-    elif ! /sbin/pfctl -a "\$ANCHOR_NAME" -sr 2>/dev/null | grep -q 'block drop out log quick'; then
-        NEED_RELOAD=1
+
+    # B. 每 30 秒 (6 ticks) 自愈巡检 pf 内核防火墙与 hosts 遥测黑洞，被别的软件清掉自动补回
+    if [ \$((tick % 6)) -eq 0 ] && [ -f "\$ANCHOR_FILE" ]; then
+        need_reload=0
+        if ! grep -Fq "anchor \"\${ANCHOR_NAME}\"" "\$PF_CONF" 2>/dev/null; then
+            printf '\n# BEGIN claude-guard-pf\nanchor "%s"\nload anchor "%s" from "%s"\n# END claude-guard-pf\n' "\$ANCHOR_NAME" "\$ANCHOR_NAME" "\$ANCHOR_FILE" >> "\$PF_CONF"
+            need_reload=1
+        fi
+        if ! /sbin/pfctl -s info 2>/dev/null | grep -qi 'Status: Enabled'; then
+            need_reload=1
+        elif ! /sbin/pfctl -a "\$ANCHOR_NAME" -sr 2>/dev/null | grep -q 'block drop out log quick'; then
+            need_reload=1
+        fi
+        if [ "\$need_reload" = "1" ]; then
+            /sbin/pfctl -f "\$PF_CONF" >/dev/null 2>&1 || true
+            /sbin/pfctl -e >/dev/null 2>&1 || true
+        fi
+        if [ "\$cur_mode" != "strict" ] && ! grep -Fq "statsig.anthropic.com" "\$HOSTS_FILE" 2>/dev/null && [ -x "\$GUARD_SH" ]; then
+            /bin/bash "\$GUARD_SH" _root-restore-blackhole >/dev/null 2>&1 || true
+        fi
     fi
-    if [ "\$NEED_RELOAD" = "1" ]; then
-        /sbin/pfctl -f "\$PF_CONF" >/dev/null 2>&1 || true
-        /sbin/pfctl -e >/dev/null 2>&1 || true
-    fi
-fi
+
+    tick=\$((tick + 1))
+    sleep 5
+done
 BOOTEOF
     chmod 755 "$PF_BOOT_SCRIPT"
     chown root:wheel "$PF_BOOT_SCRIPT" 2>/dev/null || true
@@ -529,11 +614,11 @@ BOOTEOF
 <plist version="1.0"><dict>
     <key>Label</key><string>${PF_BOOT_LABEL}</string>
     <key>ProgramArguments</key><array>
-        <string>/bin/sh</string>
+        <string>/bin/bash</string>
         <string>${PF_BOOT_SCRIPT}</string>
     </array>
     <key>RunAtLoad</key><true/>
-    <key>StartInterval</key><integer>60</integer>
+    <key>KeepAlive</key><true/>
 </dict></plist>
 PLISTEOF
     /usr/bin/xattr -d com.apple.quarantine "$PF_BOOT_PLIST" 2>/dev/null || true
@@ -556,21 +641,19 @@ ipv6_enabled_services() {
 }
 
 stop_claude_safely() {
-    if pgrep -f '/Applications/Claude.app/' >/dev/null 2>&1; then
+    if pgrep -f '/Claude\.app/' >/dev/null 2>&1; then
         osascript -e 'tell application "Claude" to quit' >/dev/null 2>&1 || true
-        for _ in 1 2 3 4 5; do
-            pgrep -f '/Applications/Claude.app/' >/dev/null 2>&1 || break
+        for _ in 1 2 3 4; do
+            pgrep -f '/Claude\.app/' >/dev/null 2>&1 || break
             sleep 1
         done
-        # 强制清理 Claude 主进程、所有 Electron Helper (Renderer/GPU/Plugin) 及后台 ShipIt 更新器，绝不留遥测残留进程
-        pkill -9 -f '/Applications/Claude.app/' 2>/dev/null || true
+        pkill -9 -f '/Claude\.app/' 2>/dev/null || true
     fi
     pkill -9 -f 'Claude Helper' 2>/dev/null || true
     local uid pids
     uid=$(id -u)
     pids=$(ps -axo pid=,uid=,comm=,args= | awk -v uid="$uid" '
-        $2 == uid && ($3 ~ /(^|\/)(claude|claude\.exe)$/ ||
-        ($3 ~ /(^|\/)(node|bun)$/ && $5 ~ /(^|\/)@anthropic-ai\/claude-code\/(bin\/claude(\.exe)?|cli\.js)$/)) { print $1 }')
+        $2 == uid && ($3 ~ /(^|\/)(claude|claude\.exe)$/ || $0 ~ /@anthropic-ai\/claude-code/) && $0 !~ /claude-guard/ { print $1 }')
     if [ -n "$pids" ]; then
         kill -TERM $pids 2>/dev/null || true
         sleep 1
@@ -612,8 +695,8 @@ print("||")
 PY
 }
 
-# ---- 内部 root 执行动作 ----
-_apply_lock_root() {
+# ---- 内部 root 应用三态 ----
+_apply_mode_root() {
     local ip_csv="$1"
     local hosts_lines="$2"
     local tun_if="$3"
@@ -623,7 +706,7 @@ _apply_lock_root() {
     local disable_v6="${7:-0}"
     local cn_src="${8:-}"
     local claude_v4="${9:-$ANTHROPIC_ASN_V4}"
-    local lock_mode="${10:-cn}"
+    local lock_mode="${10:-strict}"  # strict | cn | standby
 
     local cn_target="$PF_CN_FILE"
     if [ "$lock_mode" = "cn" ]; then
@@ -632,10 +715,10 @@ _apply_lock_root() {
         else
             mkdir -p "$(dirname "$PF_ANCHOR_FILE")" || { echo "FAIL:无法创建锚点目录"; return 1; }
             if [ -n "$cn_src" ] && [ -r "$cn_src" ]; then
-                cp "$cn_src" "$PF_CN_FILE" || { echo "FAIL:无法安装中国大陆直连 IP 表"; return 1; }
+                cp "$cn_src" "$PF_CN_FILE" || { echo "FAIL:无法安装中国大陆 IP 表"; return 1; }
                 chmod 644 "$PF_CN_FILE"
             else
-                echo "FAIL:缺少中国大陆直连 IP 表(cn-ipv4.txt)，已中止以防误断国内直连"
+                echo "FAIL:缺少中国大陆直连 IP 表(cn-ipv4.txt)"
                 return 1
             fi
         fi
@@ -658,10 +741,25 @@ _apply_lock_root() {
     if [ "${CLAUDE_GUARD_DRY_RUN:-0}" = "1" ]; then
         cat "$tmp_anchor"
         rm -f "$tmp_anchor"
-        # 演练模式下同步检验无损进程解锁逻辑
-        unlock_claude_apps_root || return 1
+        if [ "$lock_mode" = "strict" ]; then
+            unlock_claude_apps_root || return 1
+            if [ -n "$hosts_lines" ]; then
+                write_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END" "$hosts_lines"
+            else
+                remove_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END"
+            fi
+        else
+            lock_claude_apps_root || return 1
+            write_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END" "$(render_claude_hosts_blackhole)"
+        fi
         echo "OK:安全锁演练通过 (mode=${lock_mode})"
         return 0
+    fi
+
+    # 若不是 strict 工作态，必须先锁死 Claude 进程并写入 34 个主站/遥测/邮件链接黑洞!
+    if [ "$lock_mode" != "strict" ]; then
+        lock_claude_apps_root || true
+        write_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END" "$(render_claude_hosts_blackhole)"
     fi
 
     mkdir -p "$(dirname "$PF_ANCHOR_FILE")" || { rm -f "$tmp_anchor"; echo "FAIL:无法创建锚点目录"; return 1; }
@@ -670,12 +768,6 @@ _apply_lock_root() {
 
     write_managed_block "$PF_CONF" "$PF_BEGIN" "$PF_END" "anchor \"${PF_ANCHOR_NAME}\"
 load anchor \"${PF_ANCHOR_NAME}\" from \"${PF_ANCHOR_FILE}\""
-
-    if [ -n "$hosts_lines" ]; then
-        write_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END" "$hosts_lines"
-    else
-        remove_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END"
-    fi
 
     if [ -n "$tz_to_set" ]; then
         /usr/sbin/systemsetup -settimezone "$tz_to_set" >/dev/null 2>&1 || true
@@ -694,66 +786,30 @@ load anchor \"${PF_ANCHOR_NAME}\" from \"${PF_ANCHOR_FILE}\""
         return 1
     fi
     pfctl -e >/dev/null 2>&1 || true
-    install_pf_boot_daemon_root
+    install_pf_boot_daemon_root "$lock_mode"
 
-    # 关键顺序: 网络层硬锁已 100% 落盘生效后，才恢复 Claude Desktop & CLI 执行权限
-    unlock_claude_apps_root || true
-
-    dscacheutil -flushcache 2>/dev/null || true
-    killall -HUP mDNSResponder 2>/dev/null || true
-    echo "OK:安全锁已开启 (mode=${lock_mode})！Claude 现已解锁可用，且只能走海外 TUN，物理网卡 0ms 死锁一切泄露。"
+    # 仅在一级安全锁(strict 全走 TUN) 100% 生效后，才移除遥测黑洞并放行 Claude 进程!
+    if [ "$lock_mode" = "strict" ]; then
+        if [ -n "$hosts_lines" ]; then
+            write_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END" "$hosts_lines"
+        else
+            remove_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END"
+        fi
+        unlock_claude_apps_root || true
+        dscacheutil -flushcache 2>/dev/null || true
+        killall -HUP mDNSResponder 2>/dev/null || true
+        echo "OK:一级安全锁已开启！一切公网流量 100% 强制只走代理 TUN，Claude 已安全放行。"
+    elif [ "$lock_mode" = "cn" ]; then
+        dscacheutil -flushcache 2>/dev/null || true
+        killall -HUP mDNSResponder 2>/dev/null || true
+        echo "OK:已退出 Claude 并切回国内白名单网络！一切海外与 Claude 遥测服务器持续 0ms 阻断，Claude 进程已锁死。"
+    else
+        dscacheutil -flushcache 2>/dev/null || true
+        killall -HUP mDNSResponder 2>/dev/null || true
+        echo "OK:二级放宽锁已打开（防未收录国内流量误伤）！⚠️ 请严禁打开任何 Claude 服务及点击 Claude 邮件链接（底层 Claude 进程锁与遥测黑洞仍持续保护中）。"
+    fi
 }
 
-# 关闭安全锁 (日常模式): 永远保持 Claude 进程系统级死锁 + Claude 物理网卡永久 DROP + hosts 域名黑洞!
-_apply_standby_root() {
-    local tun_if="$1"
-    local tun_ip="$2"
-    local claude_v4="${3:-$ANTHROPIC_ASN_V4}"
-
-    local tmp_anchor
-    tmp_anchor=$(mktemp "${TMPDIR:-/tmp}/claude-guard-pf.XXXXXX") || { echo "FAIL:无法创建临时文件"; return 1; }
-    if ! render_pf_rules "" "$tun_if" "$tun_ip" "0" "" "$claude_v4" "standby" > "$tmp_anchor"; then
-        rm -f "$tmp_anchor"
-        return 1
-    fi
-    if ! pfctl -nvf "$tmp_anchor" >/dev/null 2>&1; then
-        echo "FAIL:standby pf 规则语法校验失败，已中止"
-        rm -f "$tmp_anchor"
-        return 1
-    fi
-
-    if [ "${CLAUDE_GUARD_DRY_RUN:-0}" = "1" ]; then
-        cat "$tmp_anchor"
-        rm -f "$tmp_anchor"
-        lock_claude_apps_root || return 1
-        write_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END" "$(render_claude_hosts_blackhole)"
-        echo "OK:日常模式(Claude系统级死锁)演练通过"
-        return 0
-    fi
-
-    # 1. 先从系统层锁死 Claude Desktop 与 CLI (点开弹提示，真实进程绝不启动)
-    lock_claude_apps_root || true
-
-    # 2. 写入 hosts 黑洞 (连浏览器点网页版都不会发本地 DNS 查询)
-    write_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END" "$(render_claude_hosts_blackhole)"
-
-    # 3. 切换 pf 为永久 Claude 物理网卡硬锁 (mode=standby)，自愈开机守护依然常驻!
-    mkdir -p "$(dirname "$PF_ANCHOR_FILE")" || { rm -f "$tmp_anchor"; echo "FAIL:无法创建锚点目录"; return 1; }
-    mv "$tmp_anchor" "$PF_ANCHOR_FILE"
-    chmod 644 "$PF_ANCHOR_FILE"
-    write_managed_block "$PF_CONF" "$PF_BEGIN" "$PF_END" "anchor \"${PF_ANCHOR_NAME}\"
-load anchor \"${PF_ANCHOR_NAME}\" from \"${PF_ANCHOR_FILE}\""
-
-    pfctl -f "$PF_CONF" >/dev/null 2>&1 || true
-    pfctl -e >/dev/null 2>&1 || true
-    install_pf_boot_daemon_root
-
-    dscacheutil -flushcache 2>/dev/null || true
-    killall -HUP mDNSResponder 2>/dev/null || true
-    echo "OK:已切换为日常上网模式！Claude 已从系统底层锁死（点开将弹出提示），且物理网卡永久阻断 Claude 流量，重启不失效。"
-}
-
-# 彻底卸载 (仅由「卸载.command」调用)
 _apply_uninstall_root() {
     if [ "${CLAUDE_GUARD_DRY_RUN:-0}" = "1" ]; then
         unlock_claude_apps_root || return 1
@@ -763,7 +819,7 @@ _apply_uninstall_root() {
     fi
     unlock_claude_apps_root || true
     launchctl bootout "system/${PF_BOOT_LABEL}" 2>/dev/null || true
-    rm -f "$PF_BOOT_PLIST" "$PF_BOOT_SCRIPT" 2>/dev/null || true
+    rm -f "$PF_BOOT_PLIST" "$PF_BOOT_SCRIPT" "$PF_STATE_FILE" 2>/dev/null || true
     pfctl -a "$PF_ANCHOR_NAME" -F all >/dev/null 2>&1 || true
     rm -f "$PF_ANCHOR_FILE" "$PF_CN_FILE" 2>/dev/null || true
     remove_managed_block "$PF_CONF" "$PF_BEGIN" "$PF_END"
@@ -775,7 +831,7 @@ _apply_uninstall_root() {
 }
 
 _verify_firewall_root() {
-    echo "=== 操作系统防火墙、进程锁与流量拦截日志验收 (macOS pf) ==="
+    echo "=== 操作系统防火墙、全版本进程守卫与丢包日志验收 (macOS pf) ==="
     echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
     echo "----------------------------------------------------------"
 
@@ -789,17 +845,17 @@ _verify_firewall_root() {
     echo "[1] pf 内核总开关状态: ${pf_status}"
 
     if [ -f "$PF_BOOT_PLIST" ] && [ -x "$PF_BOOT_SCRIPT" ]; then
-        echo "[2] 自愈开机守护 (${PF_BOOT_LABEL}): 已安装 (重启及系统更新后自动恢复 pf 硬锁)"
+        echo "[2] KeepAlive 全版本进程锁与自愈守护 (${PF_BOOT_LABEL}): 运行中 (每5秒拦截偷跑进程/新版App，每30秒自愈防火墙)"
     else
-        echo "[2] 自愈开机守护 (${PF_BOOT_LABEL}): 未安装"
+        echo "[2] KeepAlive 全版本进程锁与自愈守护 (${PF_BOOT_LABEL}): 未安装"
     fi
 
     if [ -f "$CLAUDE_APP_PATH/$CLAUDE_BLOCKER_MARK" ]; then
-        echo "[3] Claude 进程系统级死锁: 已锁死 (日常模式，双击 Claude 仅弹窗不启动真进程)"
+        echo "[3] Claude 进程系统级死锁: 已锁死 (非工作态，双击 Claude 仅弹窗不启动真进程)"
     elif [ -d "$CLAUDE_APP_PATH" ]; then
-        echo "[3] Claude 进程系统级死锁: 已放行 (安全锁开启中，仅允许走海外 TUN)"
+        echo "[3] Claude 进程系统级死锁: 已放行 (一级安全锁开启中，100% 流量只走 TUN)"
     else
-        echo "[3] Claude 进程系统级死锁: 未检测到 /Applications/Claude.app (网络层与 hosts 依然生效)"
+        echo "[3] Claude 进程系统级死锁: 未检测到 /Applications/Claude.app (未来安装时守护将自动接管)"
     fi
 
     echo "[4] 内核阻断规则与实时丢包计数 (pfctl -a ${PF_ANCHOR_NAME} -sr -v):"
@@ -815,7 +871,7 @@ _verify_firewall_root() {
     echo "    sudo tcpdump -n -e -ttt -i pflog0"
     echo "----------------------------------------------------------"
     if [ "$pf_status" = "Enabled (内核防火墙运行中)" ] && printf '%s\n' "$rules_v" | grep -q 'block drop out log quick'; then
-        echo "验收结论: [✓] 操作系统防火墙硬锁已实装生效，Claude 绝不可能绕过 TUN 泄露"
+        echo "验收结论: [✓] 操作系统防火墙硬锁与自愈守护已实装生效"
         return 0
     else
         echo "验收结论: [✗] 操作系统防火墙未处于锁定状态"
@@ -845,39 +901,24 @@ cmd_set_nodes() {
     if [ -z "$raw" ]; then
         ENTRY_NODES=""
         save_cfg
-        echo "OK:已清空海外入口白名单(国内中转机仍自动放行)"
+        echo "OK:已清空手动入口节点配置(开锁时将自动探测当前活跃代理入口 IP)"
         return 0
     fi
     local parsed ips
     parsed=$(resolve_entries "$raw")
     ips=$(printf '%s\n' "$parsed" | sed -n 's/^IP://p')
-    [ -n "$ips" ] || { echo "FAIL:未能从输入中解析出任何有效 IPv4，请检查输入: $raw"; return 1; }
+    [ -n "$ips" ] || { echo "FAIL:未能从输入中解析出有效 IPv4: $raw"; return 1; }
     ENTRY_NODES="$raw"
     save_cfg
-    echo "OK:已保存入口节点配置 ($raw)"
+    echo "OK:已保存第一跳入口节点白名单 ($raw)"
 }
 
-cmd_toggle_strict() {
-    load_cfg
-    if [ "${STRICT_MODE:-0}" = "1" ]; then
-        STRICT_MODE="0"
-        save_cfg
-        echo "OK:已切为「开锁时放行国内直连（推荐）」"
-    else
-        STRICT_MODE="1"
-        save_cfg
-        echo "OK:已切为「开锁时全封闭（连国内公网与裸DNS一并封锁）」"
-    fi
-}
-
+# 状态 1: 开启一级安全锁 (默认且强制 strict: 一切公网流量 100% 只走 TUN!)
 cmd_lock() {
     load_cfg
     local tz_set="${1:-}"
     local dis_v6="${2:-0}"
-    local lock_mode="${3:-}"
-    if [ -z "$lock_mode" ]; then
-        if [ "${STRICT_MODE:-0}" = "1" ]; then lock_mode="strict"; else lock_mode="cn"; fi
-    fi
+    local lock_mode="${3:-strict}"
 
     local cn_src=""
     if [ "$lock_mode" = "cn" ]; then
@@ -890,10 +931,19 @@ cmd_lock() {
         ip_csv=$(printf '%s\n' "$parsed" | sed -n 's/^IP://p' | paste -sd ',' - | sed 's/,/, /g')
         hosts_lines=$(printf '%s\n' "$parsed" | sed -n 's/^HOST://p')
     fi
+    # 若用户未手动填写第一跳入口 IP，自动从当前活跃代理进程 (Stash/小火箭/Clash/v2rayN) 抓取正在连接的服务器 IP!
+    if [ -z "$ip_csv" ]; then
+        ip_csv=$(auto_detect_proxy_Upstream_ips || true)
+        if [ -n "$ip_csv" ]; then
+            ENTRY_NODES="$ip_csv"
+            save_cfg
+        fi
+    fi
     if [ "$lock_mode" = "strict" ] && [ -z "$ip_csv" ]; then
-        echo "FAIL:全封闭模式前请先配置第一跳代理入口 IP 或域名（或在设置中切回默认国内放行模式）"
+        echo "FAIL:未检测到活跃代理连接，请在代理软件开启「全局+TUN」重试，或在「代理入口白名单」手动填入第一跳节点 IP"
         return 1
     fi
+
     tun_info=$(detect_tun_info || true)
     tun_if="${tun_info%%|*}"
     tun_ip="${tun_info#*|}"
@@ -906,18 +956,27 @@ cmd_lock() {
     local self_path hosts_b64 root_cmd
     self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     hosts_b64=$(printf '%s' "$hosts_lines" | base64 | tr -d '\n')
-    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_CN_FILE='${PF_CN_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' CLAUDE_GUARD_BOOT_SCRIPT='${PF_BOOT_SCRIPT}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' CLAUDE_GUARD_CLAUDE_APP='${CLAUDE_APP_PATH}' CLAUDE_GUARD_HIDDEN_APP='${CLAUDE_HIDDEN_APP}' CLAUDE_GUARD_EXTRA_CLI='${CLAUDE_GUARD_EXTRA_CLI:-}' CLAUDE_GUARD_CLI_STATE='${CLI_LOCK_STATE}' /bin/bash '${self_path}' _root-lock '${ip_csv}' '${hosts_b64}' '${tun_if}' '${tun_ip}' '0' '${tz_set}' '${dis_v6}' '${cn_src}' '${claude_v4}' '${lock_mode}'"
-    if run_as_admin "$root_cmd" "Claude 安全锁需要管理员权限以开启安全锁并放行 Claude"; then
-        LOCK_STATE="active"
+    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_CN_FILE='${PF_CN_FILE}' CLAUDE_GUARD_STATE_FILE='${PF_STATE_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' CLAUDE_GUARD_BOOT_SCRIPT='${PF_BOOT_SCRIPT}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' CLAUDE_GUARD_CLAUDE_APP='${CLAUDE_APP_PATH}' CLAUDE_GUARD_HIDDEN_APP='${CLAUDE_HIDDEN_APP}' CLAUDE_GUARD_EXTRA_CLI='${CLAUDE_GUARD_EXTRA_CLI:-}' CLAUDE_GUARD_CLI_STATE='${CLI_LOCK_STATE}' /bin/bash '${self_path}' _root-apply '${ip_csv}' '${hosts_b64}' '${tun_if}' '${tun_ip}' '0' '${tz_set}' '${dis_v6}' '${cn_src}' '${claude_v4}' '${lock_mode}'"
+    if run_as_admin "$root_cmd" "Claude 安全锁需要管理员权限以启用全走 TUN 硬锁"; then
+        if [ "$lock_mode" = "strict" ]; then LOCK_STATE="active"; else LOCK_STATE="cn"; fi
         save_cfg
         return 0
     fi
     return 1
 }
 
+# 状态 2: 关闭一级安全锁 -> 退出 Claude + 反向白名单放行国内网络 + 持续死锁海外与 Claude 遥测 + 锁死进程!
 cmd_unlock() {
     load_cfg
-    echo "正在安全关闭运行中的 Claude 桌面版与 Claude Code CLI..."
+    echo "正在安全退出 Claude 桌面版、所有 Helper 与 Claude Code CLI..."
+    stop_claude_safely
+    cmd_lock "" "0" "cn"
+}
+
+# 状态 3: 打开二级放宽锁 -> 放宽普通公网防未收录国内 IP 误伤，但持续锁死 Claude 全版本进程与 34 个遥测/邮件链接黑洞!
+cmd_relax() {
+    load_cfg
+    echo "正在确保所有 Claude 进程已彻底退出..."
     stop_claude_safely
     local tun_info tun_if tun_ip claude_v4
     tun_info=$(detect_tun_info || true)
@@ -930,9 +989,9 @@ cmd_unlock() {
     fi
     local self_path root_cmd
     self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' CLAUDE_GUARD_BOOT_SCRIPT='${PF_BOOT_SCRIPT}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' CLAUDE_GUARD_CLAUDE_APP='${CLAUDE_APP_PATH}' CLAUDE_GUARD_HIDDEN_APP='${CLAUDE_HIDDEN_APP}' CLAUDE_GUARD_EXTRA_CLI='${CLAUDE_GUARD_EXTRA_CLI:-}' CLAUDE_GUARD_CLI_STATE='${CLI_LOCK_STATE}' /bin/bash '${self_path}' _root-standby '${tun_if}' '${tun_ip}' '${claude_v4}'"
-    if run_as_admin "$root_cmd" "Claude 安全锁需要管理员权限以切换日常模式并从系统底层锁死 Claude 进程"; then
-        LOCK_STATE="standby"
+    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_STATE_FILE='${PF_STATE_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' CLAUDE_GUARD_BOOT_SCRIPT='${PF_BOOT_SCRIPT}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' CLAUDE_GUARD_CLAUDE_APP='${CLAUDE_APP_PATH}' CLAUDE_GUARD_HIDDEN_APP='${CLAUDE_HIDDEN_APP}' CLAUDE_GUARD_EXTRA_CLI='${CLAUDE_GUARD_EXTRA_CLI:-}' CLAUDE_GUARD_CLI_STATE='${CLI_LOCK_STATE}' /bin/bash '${self_path}' _root-apply '' '' '${tun_if}' '${tun_ip}' '0' '' '0' '' '${claude_v4}' 'standby'"
+    if run_as_admin "$root_cmd" "打开二级放宽锁需要管理员权限（底层 Claude 进程与遥测黑洞将继续锁定）"; then
+        LOCK_STATE="relax"
         save_cfg
         return 0
     fi
@@ -944,7 +1003,7 @@ cmd_uninstall_all() {
     stop_claude_safely
     local self_path root_cmd
     self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' CLAUDE_GUARD_BOOT_SCRIPT='${PF_BOOT_SCRIPT}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' CLAUDE_GUARD_CLAUDE_APP='${CLAUDE_APP_PATH}' CLAUDE_GUARD_HIDDEN_APP='${CLAUDE_HIDDEN_APP}' CLAUDE_GUARD_EXTRA_CLI='${CLAUDE_GUARD_EXTRA_CLI:-}' CLAUDE_GUARD_CLI_STATE='${CLI_LOCK_STATE}' /bin/bash '${self_path}' _root-uninstall"
+    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_STATE_FILE='${PF_STATE_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' CLAUDE_GUARD_BOOT_SCRIPT='${PF_BOOT_SCRIPT}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' CLAUDE_GUARD_CLAUDE_APP='${CLAUDE_APP_PATH}' CLAUDE_GUARD_HIDDEN_APP='${CLAUDE_HIDDEN_APP}' CLAUDE_GUARD_EXTRA_CLI='${CLAUDE_GUARD_EXTRA_CLI:-}' CLAUDE_GUARD_CLI_STATE='${CLI_LOCK_STATE}' /bin/bash '${self_path}' _root-uninstall"
     run_as_admin "$root_cmd" "彻底卸载需要管理员权限以还原 Claude 与系统防火墙配置"
 }
 
@@ -979,7 +1038,7 @@ cmd_init() {
 
     local locale
     locale=$(default_locale_for "$cc")
-    ENTRY_NODES="$nodes"
+    [ -n "$nodes" ] && ENTRY_NODES="$nodes"
     COUNTRY_TARGET="$cc"
     TZ_TARGET="$tz"
     LOCALE_TARGET="$locale"
@@ -988,8 +1047,11 @@ cmd_init() {
     defaults write -g AppleLocale "$LOCALE_TARGET" 2>/dev/null || true
     defaults write com.anthropic.claudefordesktop AppleLanguages -array en-US 2>/dev/null || true
 
-    cmd_lock "$TZ_TARGET" "1" || return 1
-    echo "OK:一键初始化完成 | 出口=${cc}(${ip}) | 时区=${TZ_TARGET} | 地区=${LOCALE_TARGET} | Claude语言=en-US | 全接口IPv6=已关闭 | 安全锁=已开启"
+    # 自动在客户桌面生成匹配本机实际网卡名的《断网急救.txt》
+    write_emergency_guide_to_desktop "$HOME/Desktop/断网急救.txt" 2>/dev/null || true
+
+    cmd_lock "$TZ_TARGET" "1" "strict" || return 1
+    echo "OK:一键初始化完成 | 出口=${cc}(${ip}) | 时区=${TZ_TARGET} | 地区=${LOCALE_TARGET} | 已在桌面生成《断网急救.txt》 | 一级安全锁(100%只走TUN)=已开启"
 }
 
 cmd_status() {
@@ -999,15 +1061,15 @@ cmd_status() {
     local boot_persist="off"
     local proc_locked="off"
     if [ -f "$PF_ANCHOR_FILE" ] && grep -Fq "$PF_BEGIN" "$PF_CONF" 2>/dev/null; then
-        if grep -Fq 'mode=standby' "$PF_ANCHOR_FILE" 2>/dev/null; then
-            lock_state="standby"
-            lock_mode="standby"
-        elif grep -Fq 'mode=strict' "$PF_ANCHOR_FILE" 2>/dev/null; then
+        if grep -Fq 'mode=strict' "$PF_ANCHOR_FILE" 2>/dev/null; then
             lock_state="on"
             lock_mode="strict"
-        else
-            lock_state="on"
+        elif grep -Fq 'mode=cn' "$PF_ANCHOR_FILE" 2>/dev/null; then
+            lock_state="cn"
             lock_mode="cn"
+        elif grep -Fq 'mode=standby' "$PF_ANCHOR_FILE" 2>/dev/null; then
+            lock_state="relax"
+            lock_mode="standby"
         fi
     fi
     [ -f "$PF_BOOT_PLIST" ] && boot_persist="on"
@@ -1016,7 +1078,6 @@ cmd_status() {
     echo "LOCK_MODE=${lock_mode}"
     echo "PROC_LOCKED=${proc_locked}"
     echo "PERSISTENT_LOCK=${boot_persist}"
-    echo "STRICT_MODE=${STRICT_MODE:-0}"
     echo "ENTRY_NODES=${ENTRY_NODES:-未配置}"
     echo "COUNTRY_TARGET=${COUNTRY_TARGET:-未配置}"
     echo "TZ_TARGET=${TZ_TARGET:-未配置}"
@@ -1041,15 +1102,15 @@ cmd_check() {
 cmd="${1:-status}"
 shift || true
 case "$cmd" in
-    init)           cmd_init "${1:-}" "${2:-}" ;;
-    set-nodes)      cmd_set_nodes "${1:-}" ;;
-    toggle-strict)  cmd_toggle_strict ;;
-    lock|lock-cn)   cmd_lock "${1:-}" "${2:-0}" "${3:-}" ;;
-    lock-strict)    cmd_lock "${1:-}" "${2:-0}" "strict" ;;
-    unlock)         cmd_unlock ;;
-    uninstall-all)  cmd_uninstall_all ;;
-    status)         cmd_status ;;
-    check)          cmd_check "${1:-}" ;;
+    init)            cmd_init "${1:-}" "${2:-}" ;;
+    set-nodes)       cmd_set_nodes "${1:-}" ;;
+    lock|lock-strict) cmd_lock "${1:-}" "${2:-0}" "strict" ;;
+    unlock|lock-cn)  cmd_unlock ;;
+    relax)           cmd_relax ;;
+    write-emergency) write_emergency_guide_to_desktop "${1:-$HOME/Desktop/断网急救.txt}" && echo "OK:已在桌面生成本机专属《断网急救.txt》" ;;
+    uninstall-all)   cmd_uninstall_all ;;
+    status)          cmd_status ;;
+    check)           cmd_check "${1:-}" ;;
     verify-firewall) cmd_verify_firewall ;;
     export-report)
         out_f="${1:-$HOME/Desktop/claude-env-report-$(date +%Y%m%d-%H%M%S).txt}"
@@ -1057,20 +1118,22 @@ case "$cmd" in
         rc=$?
         echo "REPORT_FILE=$out_f"
         exit "$rc" ;;
-    render)         render_pf_rules "$@" ;;
-    _root-lock)
+    render)          render_pf_rules "$@" ;;
+    _root-apply)
         hosts_decoded=""
         if [ -n "${2:-}" ]; then
             hosts_decoded=$(printf '%s' "${2}" | base64 -D 2>/dev/null || printf '%s' "${2}" | base64 -d 2>/dev/null || true)
         fi
-        _apply_lock_root "${1:-}" "$hosts_decoded" "${3:-}" "${4:-}" "${5:-0}" "${6:-}" "${7:-0}" "${8:-}" "${9:-$ANTHROPIC_ASN_V4}" "${10:-cn}" ;;
-    _root-standby)
-        _apply_standby_root "${1:-}" "${2:-}" "${3:-$ANTHROPIC_ASN_V4}" ;;
+        _apply_mode_root "${1:-}" "$hosts_decoded" "${3:-}" "${4:-}" "${5:-0}" "${6:-}" "${7:-0}" "${8:-}" "${9:-$ANTHROPIC_ASN_V4}" "${10:-strict}" ;;
+    _root-relock-apps)
+        lock_claude_apps_root ;;
+    _root-restore-blackhole)
+        write_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END" "$(render_claude_hosts_blackhole)" ;;
     _root-uninstall)
         _apply_uninstall_root ;;
     _root-verify-firewall)
         _verify_firewall_root ;;
     *)
-        echo "用法: claude-guard.sh init <入口IP或域名> [国家码] | set-nodes <入口IP或域名> | toggle-strict | lock | unlock | uninstall-all | verify-firewall | status | check | export-report [文件]"
+        echo "用法: claude-guard.sh init [入口IP] | set-nodes <入口IP> | lock | unlock | relax | write-emergency | uninstall-all | verify-firewall | status | check | export-report"
         exit 2 ;;
 esac

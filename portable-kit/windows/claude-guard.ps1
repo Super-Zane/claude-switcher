@@ -1,19 +1,12 @@
-﻿# Claude 持久化安全锁 · Windows 极简单锁核心引擎 (内核级 IFEO 进程硬锁 + 永久 Claude/遥测网络硬锁)
-# 核心铁律 (除非运行「卸载.bat」，否则永久生效):
-#   1. 开启安全锁 (lock):
-#        - Zero-Gap 原子刷入 WFP 持久化防火墙规则: 物理网卡死锁 Claude(ASN+主服务+全系遥测IP) + 目标应用进程 + 一切海外公网(或全封闭) + 公网IPv6 + STUN
-#        - 校验三档防火墙真实 Enabled=True (若被第三方杀软接管则显式报 FAIL) 并开启 LogBlocked=True -> pfirewall.log
-#        - 移除 hosts 黑洞并摘除 IFEO 进程锁，放行 Claude 仅通过海外 TUN 运行
-#   2. 关闭安全锁 (unlock · 日常上网模式):
-#        - 强制终止 Claude 主进程、更新器与 CLI
-#        - 写入 Windows 内核级 IFEO 注册表锁 (Claude.exe -> claude-blocked-alert.vbs): 无论传统版/MSIX商店版/自动更新后，点开永远启动不了并 0ms 弹出中文提示！
-#        - 写入 hosts 托管黑洞 (0.0.0.0 + :: 覆盖全部 24 个 Claude 主站与遥测/Sentry/Statsig 域名，连浏览器残留标签页也不发本地 DNS)
-#        - WFP 防火墙切换为永久 standby 防线: 放行日常上网，但物理网卡永久 0ms 阻断 Claude ASN/遥测 IP 与目标应用出站 (重启/软件退出不失效)
-#   3. 彻底卸载 (uninstall-all，仅由卸载脚本调用):
-#        - 完整清理 IFEO 注册表锁、WFP 防火墙规则组与 hosts 托管块，恢复原生系统
+﻿# Claude 持久化安全锁 · Windows 三态防呆核心引擎 (v2.2)
+# 完美适配「代理客户端默认开全局 + TUN」工作流:
+#   - 状态 1 [lock / strict]:   一级安全锁开启 (Claude 工作态) -> 一切公网流量 100% 只走代理 TUN，自动识别第一跳节点 IP，放行 Claude 启动
+#   - 状态 2 [unlock / cn]:     一级安全锁关闭 (国内网络态)   -> 先退出 Claude 并锁死全版本进程; 放行国内 CN 段，持续死锁一切海外与 Claude 遥测
+#   - 状态 3 [relax / standby]: 二级放宽锁打开 (防国内误伤态) -> 放宽普通公网防未收录国内 IP 误伤，但永久焊死 Claude 全版本进程锁(IFEO+守卫) + 34 个主站/遥测/邮件链接黑洞 + ASN 拦截
+#   - 彻底卸载 [uninstall-all]: 仅在卸载软件时解除永久进程锁、自愈守卫与防火墙规则，恢复出厂状态
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('init', 'set-nodes', 'set-strict', 'lock', 'lock-cn', 'lock-strict', 'unlock', 'uninstall-all', 'verify-firewall', 'status', 'check', 'export-report')]
+    [ValidateSet('init', 'set-nodes', 'lock', 'lock-strict', 'unlock', 'lock-cn', 'relax', 'write-emergency', 'watchdog-loop', 'uninstall-all', 'verify-firewall', 'status', 'check', 'export-report')]
     [string]$Action = 'status',
     [Parameter(Position = 1)]
     [string]$Nodes = '',
@@ -23,6 +16,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $FW_GROUP = 'ClaudeGuard-KillSwitch'
+$WATCHDOG_TASK = 'ClaudeGuard-Watchdog'
+$STATE_DIR = 'C:\ProgramData\ClaudeGuard\state'
+$SYS_CFG_FILE = Join-Path $STATE_DIR 'system-state.json'
 $APP_DIR = Join-Path $env:USERPROFILE '.claude-guard'
 $CFG_FILE = Join-Path $APP_DIR 'config.json'
 $HOSTS_FILE = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
@@ -34,15 +30,18 @@ $BLOCKER_VBS = Join-Path $PSScriptRoot 'claude-blocked-alert.vbs'
 
 $ANTHROPIC_ASN_V4 = '160.79.104.0/21'
 $ANTHROPIC_ASN_V6 = '2607:6bc0::/48'
-# 完整覆盖 Claude 主服务 + API/CDN + MCP + 专属遥测/埋点/灰度开关/Sentry(o1158394) 崩溃上报域名 (25 个)
+# 34 个全系域名: 主站 + API/CDN + MCP + 邮件点击跳转链接 + Statsig/Sentry(o1158394)/Datadog 遥测上报端点
 $ANTHROPIC_DOMAINS = @(
     'claude.ai', 'www.claude.ai', 'a-cdn.claude.ai', 'a-api.claude.ai', 'downloads.claude.ai',
+    'links.claude.ai', 'email.claude.ai',
     'claude.com', 'www.claude.com', 'platform.claude.com', 'claudemcpclient.com',
     'api.anthropic.com', 'anthropic.com', 'www.anthropic.com', 'console.anthropic.com', 'auth.anthropic.com', 'mcp-proxy.anthropic.com',
+    'docs.anthropic.com', 'support.anthropic.com', 'status.anthropic.com', 'mail.anthropic.com', 'e.anthropic.com',
     'claudeusercontent.com',
     'statsig.anthropic.com', 'events.anthropic.com', 'telemetry.anthropic.com',
     'o1158394.ingest.sentry.io', 'o1158394.ingest.us.sentry.io',
-    'statsigapi.net', 'events.statsigapi.net', 'featuregates.org', 'prodregistryv2.org'
+    'statsigapi.net', 'events.statsigapi.net', 'featuregates.org', 'prodregistryv2.org',
+    'browser-intake-datadoghq.com', 'http-intake.logs.datadoghq.com'
 )
 
 New-Item -ItemType Directory -Force -Path $APP_DIR | Out-Null
@@ -82,29 +81,35 @@ function Load-Config {
         countryTarget = ''
         tzTarget = ''
         localeTarget = ''
-        strictMode = $false
         lockMode = 'off'
     }
-    if (Test-Path -LiteralPath $CFG_FILE) {
-        try {
-            $raw = Get-Content -LiteralPath $CFG_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($raw.entryNodes) { $cfg.entryNodes = [string]$raw.entryNodes }
-            if ($raw.countryTarget) { $cfg.countryTarget = [string]$raw.countryTarget }
-            if ($raw.tzTarget) { $cfg.tzTarget = [string]$raw.tzTarget }
-            if ($raw.localeTarget) { $cfg.localeTarget = [string]$raw.localeTarget }
-            if ($null -ne $raw.strictMode) { $cfg.strictMode = [bool]$raw.strictMode }
-            if ($raw.lockMode) { $cfg.lockMode = [string]$raw.lockMode }
-        } catch {}
+    foreach ($f in @($CFG_FILE, $SYS_CFG_FILE)) {
+        if (Test-Path -LiteralPath $f) {
+            try {
+                $raw = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($raw.entryNodes) { $cfg.entryNodes = [string]$raw.entryNodes }
+                if ($raw.countryTarget) { $cfg.countryTarget = [string]$raw.countryTarget }
+                if ($raw.tzTarget) { $cfg.tzTarget = [string]$raw.tzTarget }
+                if ($raw.localeTarget) { $cfg.localeTarget = [string]$raw.localeTarget }
+                if ($raw.lockMode) { $cfg.lockMode = [string]$raw.lockMode }
+                break
+            } catch {}
+        }
     }
     return $cfg
 }
 
 function Save-Config($cfg) {
-    $json = $cfg | ConvertTo-Json -Depth 4
-    [System.IO.File]::WriteAllText($CFG_FILE, $json + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    $json = ($cfg | ConvertTo-Json -Depth 4) + "`n"
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($CFG_FILE, $json, $enc)
+    try {
+        New-Item -ItemType Directory -Force -Path $STATE_DIR -ErrorAction SilentlyContinue | Out-Null
+        [System.IO.File]::WriteAllText($SYS_CFG_FILE, $json, $enc)
+    } catch {}
 }
 
-# ---- IPv4 整数与合法单播区间运算 (严格限定 1.0.0.0 - 223.255.255.255) ----
+# ---- IPv4 合法单播区间运算 (1.0.0.0 - 223.255.255.255) ----
 function ConvertTo-UInt32Ip([string]$Ip) {
     $addr = [System.Net.IPAddress]::Parse($Ip)
     $b = $addr.GetAddressBytes()
@@ -206,14 +211,36 @@ function Subtract-CidrsFromRanges([string[]]$BaseRanges, [string[]]$WhitelistCid
 }
 
 function Find-OverseasRangesFile {
-    $candidates = @(
+    foreach ($p in @(
         (Join-Path $PSScriptRoot '..\data\overseas-ipv4-ranges.txt'),
         (Join-Path $PSScriptRoot 'overseas-ipv4-ranges.txt')
-    )
-    foreach ($p in $candidates) {
+    )) {
         if (Test-Path -LiteralPath $p) { return $p }
     }
     return $null
+}
+
+# 自动探测当前活跃代理进程 (Clash Verge / Mihomo / v2rayN / sing-box / xray) 正在连接的远端第一跳公网 IPv4
+function Get-AutoDetectedProxyUpstreamIps {
+    $found = New-Object System.Collections.Generic.HashSet[string]
+    try {
+        $proxyPids = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProcessName -match '(?i)(verge|mihomo|clash|v2ray|xray|sing-box|hysteria|tuic|naive|brook)'
+        } | Select-Object -ExpandProperty Id)
+        if ($proxyPids.Count -gt 0) {
+            foreach ($conn in @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Where-Object { $proxyPids -contains $_.OwningProcess })) {
+                $rip = [string]$conn.RemoteAddress
+                if ($rip -match '^\d+\.\d+\.\d+\.\d+$' -and
+                    $rip -notlike '127.*' -and $rip -notlike '10.*' -and $rip -notlike '192.168.*' -and
+                    $rip -notlike '169.254.*' -and $rip -notlike '198.18.*' -and $rip -notlike '198.19.*' -and
+                    $rip -notmatch '^172\.(1[6-9]|2[0-9]|3[0-1])\.' -and
+                    $rip -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.') {
+                    $null = $found.Add($rip)
+                }
+            }
+        }
+    } catch {}
+    return @($found)
 }
 
 function Resolve-EntryNodes([string]$Raw) {
@@ -282,11 +309,10 @@ function Resolve-ClaudeBlockV4([string[]]$WhitelistCidrs) {
 
 function Get-ProtectedClaudeExes {
     $exes = New-Object System.Collections.Generic.HashSet[string] ([System.StringComparer]::OrdinalIgnoreCase)
-    $staticPaths = @(
+    foreach ($p in @(
         (Join-Path $env:LOCALAPPDATA 'AnthropicClaude\claude.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\claude\Claude.exe')
-    )
-    foreach ($p in $staticPaths) {
+    )) {
         if ($p -and (Test-Path -LiteralPath $p)) { $null = $exes.Add($p) }
     }
     try {
@@ -296,7 +322,7 @@ function Get-ProtectedClaudeExes {
         }
     } catch {}
     try {
-        $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $pkg = Get-AppxPackage -Name '*Claude*' -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($pkg -and $pkg.InstallLocation) {
             foreach ($f in @(Get-ChildItem -LiteralPath $pkg.InstallLocation -Filter 'Claude.exe' -Recurse -ErrorAction SilentlyContinue)) {
                 $null = $exes.Add($f.FullName)
@@ -319,7 +345,7 @@ function Get-ClaudeBlackholeHostsLines {
     return @($lines)
 }
 
-# ---- Windows 内核级 IFEO 进程死锁 (与路径/MSIX 版本号无关，永远拦截 Claude.exe 启动并弹窗) ----
+# ---- Windows 内核级 IFEO + SYSTEM 常驻全版本守卫 (永久免维护适配未来所有新版 Desktop/MSIX/npm/npx/bun CLI) ----
 function Enable-ClaudeProcessLock {
     $vbsPath = $BLOCKER_VBS
     if (-not (Test-Path -LiteralPath $vbsPath)) {
@@ -349,12 +375,103 @@ function Test-ClaudeProcessLocked {
     } catch { return $false }
 }
 
+function Install-WatchdogTask {
+    try {
+        $selfScript = Join-Path $PSScriptRoot 'claude-guard.ps1'
+        $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$selfScript`" watchdog-loop"
+        $trig = New-ScheduledTaskTrigger -AtStartup
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $WATCHDOG_TASK -Action $act -Trigger $trig -Principal $principal -Settings $settings -Force -ErrorAction SilentlyContinue | Out-Null
+        Start-ScheduledTask -TaskName $WATCHDOG_TASK -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+function Uninstall-WatchdogTask {
+    try {
+        Stop-ScheduledTask -TaskName $WATCHDOG_TASK -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $WATCHDOG_TASK -Confirm:$false -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+function Invoke-WatchdogLoop {
+    $tick = 0
+    while ($true) {
+        try {
+            $cfg = Load-Config
+            $mode = $cfg.lockMode
+            if ($mode -eq 'off') { break }
+
+            # A. 非 strict 工作态下: 全版本进程实时拦截 (覆盖 npm/npx/bunx @anthropic-ai/claude-code 与任意新版 Claude Desktop)
+            if ($mode -ne 'strict') {
+                if (-not (Test-ClaudeProcessLocked)) { Enable-ClaudeProcessLock }
+                foreach ($np in @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='bun.exe' OR Name='Claude.exe' OR Name='claude.exe' OR Name='Update.exe'" -ErrorAction SilentlyContinue)) {
+                    $cmd = [string]$np.CommandLine
+                    $ep  = [string]$np.ExecutablePath
+                    if (($cmd -match '@anthropic-ai[/\\]claude-code') -or ($ep -match 'AnthropicClaude|WindowsApps\\Claude_')) {
+                        Stop-Process -Id ([int]$np.ProcessId) -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+
+            # B. 每 32 秒 (8 ticks) 自愈巡检 WFP 防火墙与 hosts 黑洞: 若被第三方杀软/VPN 清掉，自动补回!
+            if (($tick % 8) -eq 0) {
+                $rules = @(Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' })
+                if ($rules.Count -lt 2) {
+                    Invoke-ApplyMode $cfg $mode $true | Out-Null
+                }
+                if ($mode -ne 'strict' -and (Test-Path -LiteralPath $HOSTS_FILE)) {
+                    $ht = Get-Content -LiteralPath $HOSTS_FILE -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if ($ht -notmatch 'statsig\.anthropic\.com') {
+                        Update-HostsManagedBlock (Get-ClaudeBlackholeHostsLines)
+                    }
+                }
+            }
+        } catch {}
+        $tick++
+        Start-Sleep -Seconds 4
+    }
+}
+
+function Write-EmergencyGuideToDesktop([string]$TargetFile = '') {
+    if (-not $TargetFile) {
+        $TargetFile = Join-Path ([Environment]::GetFolderPath('Desktop')) '断网急救.txt'
+    }
+    $txt = @"
+====================================================================
+  Claude 安全锁 · Windows 专属断网急救指南（手机拍照留存，照抄即通）
+====================================================================
+
+【为什么会断网？】
+开启一级安全锁后，系统强制「一切公网流量 100% 只走代理 TUN」。
+若 Clash Verge / v2rayN 退出了、未开启「全局 + TUN」、或节点挂了，外网会被防火墙 0ms 拦截以保护账号不漏国内 IP。
+
+【第 1 步（最简单）】
+1. 打开 Clash Verge(开启服务模式+TUN+全局) 或 v2rayN(管理员运行+启用Tun+全局)，等 10 秒；
+2. 若当前不想开代理，直接双击桌面「Claude安全锁」点击「关闭安全锁」切换回国内网络（Claude 仍保持锁死不泄露）。
+
+【第 2 步（若国内部分未收录偏门网站被误拦）】
+在「Claude安全锁」界面下方打开「二级放宽锁」（注意：打开期间严禁点击任何 Claude 服务及任何 Claude 邮件链接！）。
+
+【第 3 步（管理员 PowerShell 终极急救命令 —— 复制粘贴回车即恢复）】
+1) 一键彻底解除防火墙锁与进程锁：
+  powershell -ExecutionPolicy Bypass -File "C:\ProgramData\ClaudeGuard\windows\claude-guard.ps1" uninstall-all
+
+2) 清理代理异常退出残留的 Windows 系统代理：
+  Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyEnable -Value 0
+====================================================================
+"@
+    try {
+        [System.IO.File]::WriteAllText($TargetFile, ($txt -replace "`r?`n", "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+    } catch {}
+}
+
 function Ensure-FirewallProfilesEnabled {
     Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -LogBlocked True -LogFileName $PFW_LOG -LogMaxSizeKilobytes 16384 -ErrorAction SilentlyContinue
     $profs = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue)
     $disabled = @($profs | Where-Object { -not $_.Enabled } | ForEach-Object { $_.Name })
     if ($disabled.Count -gt 0) {
-        return "FAIL:检测到 Windows 防火墙配置档 ($($disabled -join ',')) 处于关闭状态（可能被 360/火绒/第三方杀软接管或组策略强制关闭），硬锁无法生效！请先在安全软件中放行或恢复 Windows Defender 防火墙。"
+        return "FAIL:检测到 Windows 防火墙配置档 ($($disabled -join ',')) 被 360/火绒/第三方杀软关闭，硬锁无法生效！请先恢复 Windows Defender 防火墙。"
     }
     return ''
 }
@@ -394,34 +511,22 @@ function Get-TunInfo {
     }
     $uniqueIdx = @($tunIndices | Select-Object -Unique)
     $uniqueIps = @($tunIps | Select-Object -Unique)
-    $routeViaTun = $false; $bestAlias = ''
-    try {
-        $routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue)
-        if ($routes.Count -gt 0) {
-            $best = $routes | Sort-Object { [int]$_.RouteMetric + [int]$_.InterfaceMetric } | Select-Object -First 1
-            if ($best) {
-                $bestAlias = [string]$best.InterfaceAlias
-                if ($uniqueIdx -contains [int]$best.InterfaceIndex) { $routeViaTun = $true }
-            }
-        }
-    } catch {}
-    return [pscustomobject]@{ Up = ($uniqueIdx.Count -gt 0); RouteViaTun = $routeViaTun; BestAlias = $bestAlias; TunIps = $uniqueIps }
+    return [pscustomobject]@{ Up = ($uniqueIdx.Count -gt 0); TunIps = $uniqueIps }
 }
 
 function Stop-ClaudeSafely {
     $desktop = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
     if ($desktop) {
         foreach ($p in $desktop) { try { $null = $p.CloseMainWindow() } catch {} }
-        for ($i = 0; $i -lt 4; $i++) { if (-not (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue)) { break }; Start-Sleep 1 }
+        for ($i = 0; $i -lt 3; $i++) { if (-not (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue)) { break }; Start-Sleep 1 }
         Get-Process -Name 'Claude' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     }
     try {
         Get-Process -Name 'claude' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        # 彻底清零 Claude Code CLI 及 AnthropicClaude 后台更新器进程，绝不留遥测残留
         foreach ($np in @(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='bun.exe' OR Name='Update.exe'" -ErrorAction SilentlyContinue)) {
             $cmd = [string]$np.CommandLine
             $ep  = [string]$np.ExecutablePath
-            if (($cmd -match '@anthropic-ai[/\\]claude-code[/\\](bin[/\\]claude(\.exe)?|cli\.js)') -or ($ep -match 'AnthropicClaude')) {
+            if (($cmd -match '@anthropic-ai[/\\]claude-code') -or ($ep -match 'AnthropicClaude|WindowsApps\\Claude_')) {
                 Stop-Process -Id ([int]$np.ProcessId) -Force -ErrorAction SilentlyContinue
             }
         }
@@ -460,32 +565,36 @@ function Get-GeoInfo {
             if ($cc -match '^[A-Z]{2}$') { return [pscustomobject]@{ Country = $cc; IanaTz = [string]$d.$($s.Tz); Ip = [string]$d.$($s.Ip) } }
         } catch {}
     }
-    try {
-        $t = Invoke-WebRequest -Uri 'https://www.cloudflare.com/cdn-cgi/trace' -UserAgent $ua -TimeoutSec 6 -UseBasicParsing -ErrorAction Stop
-        $cc = ''; $ip = ''
-        foreach ($line in ($t.Content -split "`r?`n")) {
-            if ($line -match '^loc=([A-Za-z]{2})$') { $cc = $Matches[1].ToUpperInvariant() }
-            if ($line -match '^ip=(\S+)$') { $ip = $Matches[1] }
-        }
-        if ($cc -match '^[A-Z]{2}$') { return [pscustomobject]@{ Country = $cc; IanaTz = ''; Ip = $ip } }
-    } catch {}
     return [pscustomobject]@{ Country = ''; IanaTz = ''; Ip = '' }
 }
 
-function Invoke-Lock($cfg, [string]$Mode = '') {
+# 应用三态: strict (一级锁开启·全走TUN) | cn (一级锁关闭·国内白名单直连) | standby (二级放宽锁打开·防国内误伤)
+function Invoke-ApplyMode($cfg, [string]$Mode = 'strict', [bool]$Silent = $false) {
     if (-not (Test-IsAdmin)) {
-        Write-Output 'FAIL:开启安全锁需要管理员权限，请通过「Claude安全锁控制台.bat」运行'
+        Write-Output 'FAIL:操作安全锁需要管理员权限'
         exit 1
     }
-    if (-not $Mode) { $Mode = if ($cfg.strictMode) { 'strict' } else { 'cn' } }
+    $fwErr = Ensure-FirewallProfilesEnabled
+    if ($fwErr) { Write-Output $fwErr; exit 1 }
+
     $resolved = Resolve-EntryNodes $cfg.entryNodes
     if ($Mode -eq 'strict' -and $resolved.Cidrs.Count -eq 0) {
-        Write-Output 'FAIL:全封闭模式前请先填写第一跳代理入口 IP 或域名（或取消勾选全封闭切回默认国内放行模式）'
+        $autoIps = Get-AutoDetectedProxyUpstreamIps
+        if ($autoIps.Count -gt 0) {
+            $cfg.entryNodes = ($autoIps -join ', ')
+            $resolved = Resolve-EntryNodes $cfg.entryNodes
+        }
+    }
+    if ($Mode -eq 'strict' -and $resolved.Cidrs.Count -eq 0) {
+        Write-Output 'FAIL:未检测到活跃代理连接，请先开启代理「全局+TUN」重试，或在输入框手动填写第一跳节点 IP'
         exit 1
     }
 
-    $fwErr = Ensure-FirewallProfilesEnabled
-    if ($fwErr) { Write-Output $fwErr; exit 1 }
+    if ($Mode -ne 'strict') {
+        if (-not $Silent) { Stop-ClaudeSafely }
+        Enable-ClaudeProcessLock
+        Update-HostsManagedBlock (Get-ClaudeBlackholeHostsLines)
+    }
 
     $tun = Get-TunInfo
     $localExcludes = New-Object System.Collections.Generic.List[string]
@@ -493,47 +602,54 @@ function Invoke-Lock($cfg, [string]$Mode = '') {
     foreach ($tip in $tun.TunIps) { $localExcludes.Add("$tip/32") }
     $nonTunLocalV4 = Get-ComplementIpv4Ranges @($localExcludes)
     $publicRemoteV4 = Get-ComplementIpv4Ranges @('10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')
-    $claudeV4 = Resolve-ClaudeBlockV4 $resolved.Cidrs
+    $claudeV4 = Resolve-ClaudeBlockV4 $(if ($Mode -eq 'strict') { $resolved.Cidrs } else { @() })
 
-    # Zero-Gap 原子切换: 先记录旧规则，待全部新规则生效后再删除旧规则，0ms 无空窗
+    # Zero-Gap 原子切换: 先建新锁、后删旧锁
     $oldRules = @(Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue)
     $gen = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString()
 
-    New-NetFirewallRule -DisplayName 'ClaudeGuard: 死锁 Claude/Anthropic ASN 与全系遥测 IP (IPv4)' `
-        -Name "ClaudeGuard-Block-Claude-ASN-V4-$gen" `
-        -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
-        -LocalAddress $nonTunLocalV4 -RemoteAddress $claudeV4 | Out-Null
+    if ($Mode -eq 'standby') {
+        New-NetFirewallRule -DisplayName 'ClaudeGuard[二级放宽锁底线]: 永久死锁 Claude ASN 与 34 个遥测/邮件链接 IP (IPv4)' `
+            -Name "ClaudeGuard-Standby-Claude-V4-$gen" `
+            -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
+            -LocalAddress $nonTunLocalV4 -RemoteAddress $claudeV4 | Out-Null
 
-    New-NetFirewallRule -DisplayName 'ClaudeGuard: 死锁全部公网 IPv6 与 Anthropic IPv6' `
-        -Name "ClaudeGuard-Block-All-Public-V6-$gen" `
-        -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
-        -RemoteAddress @($ANTHROPIC_ASN_V6, '2000::/3') | Out-Null
+        New-NetFirewallRule -DisplayName 'ClaudeGuard[二级放宽锁底线]: 永久死锁 Anthropic IPv6' `
+            -Name "ClaudeGuard-Standby-Claude-V6-$gen" `
+            -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
+            -RemoteAddress $ANTHROPIC_ASN_V6 | Out-Null
+    } else {
+        New-NetFirewallRule -DisplayName 'ClaudeGuard: 死锁 Claude ASN 与 34 个遥测/邮件链接 IP (IPv4)' `
+            -Name "ClaudeGuard-Block-Claude-ASN-V4-$gen" `
+            -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
+            -LocalAddress $nonTunLocalV4 -RemoteAddress $claudeV4 | Out-Null
 
-    New-NetFirewallRule -DisplayName 'ClaudeGuard: 阻断物理网卡 STUN/WebRTC UDP' `
-        -Name "ClaudeGuard-Block-STUN-UDP-$gen" `
-        -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
-        -Protocol UDP -RemotePort @('3478', '5349', '19302') -LocalAddress $nonTunLocalV4 | Out-Null
+        New-NetFirewallRule -DisplayName 'ClaudeGuard: 死锁全部公网 IPv6 与 Anthropic IPv6' `
+            -Name "ClaudeGuard-Block-All-Public-V6-$gen" `
+            -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
+            -RemoteAddress @($ANTHROPIC_ASN_V6, '2000::/3') | Out-Null
+
+        New-NetFirewallRule -DisplayName 'ClaudeGuard: 阻断物理网卡 STUN/WebRTC UDP' `
+            -Name "ClaudeGuard-Block-STUN-UDP-$gen" `
+            -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
+            -Protocol UDP -RemotePort @('3478', '5349', '19302') -LocalAddress $nonTunLocalV4 | Out-Null
+    }
 
     $appIdx = 0
     foreach ($exe in (Get-ProtectedClaudeExes)) {
         $appIdx++
-        New-NetFirewallRule -DisplayName "ClaudeGuard: 死锁目标应用物理直连 #$appIdx (IPv4)" `
+        New-NetFirewallRule -DisplayName "ClaudeGuard: 永久死锁目标应用物理直连 #$appIdx (IPv4)" `
             -Name "ClaudeGuard-Block-TargetApp-V4-$appIdx-$gen" `
             -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
             -Program $exe -LocalAddress $nonTunLocalV4 -RemoteAddress $publicRemoteV4 | Out-Null
-        New-NetFirewallRule -DisplayName "ClaudeGuard: 死锁目标应用物理直连 #$appIdx (IPv6)" `
-            -Name "ClaudeGuard-Block-TargetApp-V6-$appIdx-$gen" `
-            -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
-            -Program $exe -RemoteAddress '2000::/3' | Out-Null
     }
 
-    $shardCount = 0
     if ($Mode -eq 'strict') {
         $remoteExcludes = New-Object System.Collections.Generic.List[string]
         foreach ($lan in @('10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')) { $remoteExcludes.Add($lan) }
         foreach ($c in $resolved.Cidrs) { $remoteExcludes.Add($c) }
         $blockedAll = Get-ComplementIpv4Ranges @($remoteExcludes)
-        New-NetFirewallRule -DisplayName 'ClaudeGuard: 全封闭模式仅放行白名单入口 (IPv4)' `
+        New-NetFirewallRule -DisplayName 'ClaudeGuard[一级安全锁]: 100% 流量强制只走 TUN (IPv4)' `
             -Name "ClaudeGuard-Block-Strict-All-V4-$gen" `
             -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
             -LocalAddress $nonTunLocalV4 -RemoteAddress $blockedAll | Out-Null
@@ -545,155 +661,89 @@ function Invoke-Lock($cfg, [string]$Mode = '') {
             -Name "ClaudeGuard-Block-Phys-DNS-TCP-$gen" `
             -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
             -Protocol TCP -RemotePort '53' -LocalAddress $nonTunLocalV4 | Out-Null
-        $shardCount = 1
-    } else {
+    } elseif ($Mode -eq 'cn') {
         $ovFile = Find-OverseasRangesFile
-        if (-not $ovFile) {
-            Write-Output 'FAIL:找不到海外公网补集区间表 (data\overseas-ipv4-ranges.txt)，已中止'
-            exit 1
-        }
+        if (-not $ovFile) { Write-Output 'FAIL:缺少海外区间表 (data\overseas-ipv4-ranges.txt)'; exit 1 }
         $baseOverseas = @(Get-Content -LiteralPath $ovFile -Encoding UTF8)
         $overseasBlocked = Subtract-CidrsFromRanges $baseOverseas $resolved.Cidrs
-        $chunkSize = 400
+        $chunkSize = 400; $part = 0
         for ($off = 0; $off -lt $overseasBlocked.Count; $off += $chunkSize) {
-            $shardCount++
+            $part++
             $endIdx = [Math]::Min($off + $chunkSize - 1, $overseasBlocked.Count - 1)
             $slice = @($overseasBlocked[$off..$endIdx])
-            New-NetFirewallRule -DisplayName "ClaudeGuard: 死锁一切海外公网服务 分片#$shardCount (放行国内直连)" `
-                -Name "ClaudeGuard-Block-Overseas-V4-Part$shardCount-$gen" `
+            New-NetFirewallRule -DisplayName "ClaudeGuard[国内网络态]: 反向规则死锁海外公网 分片#$part" `
+                -Name "ClaudeGuard-Block-Overseas-V4-Part$part-$gen" `
                 -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
                 -LocalAddress $nonTunLocalV4 -RemoteAddress $slice | Out-Null
         }
     }
 
     if ($oldRules.Count -gt 0) { $oldRules | Remove-NetFirewallRule -ErrorAction SilentlyContinue }
-    # 网络硬锁 100% 落盘生效后，才移除 hosts 黑洞并放行 IFEO 进程锁
-    Update-HostsManagedBlock $resolved.Hosts
-    Disable-ClaudeProcessLock
 
     $cfg.lockMode = $Mode
     Save-Config $cfg
-    Clear-DnsClientCache -ErrorAction SilentlyContinue
-    $modeLabel = if ($Mode -eq 'strict') { '全封闭模式(仅海外TUN)' } else { '放行国内直连 + 死锁Claude与一切海外' }
-    Write-Output "OK:安全锁已开启 [$modeLabel]！Claude 现已解锁可用，且只能走海外 TUN，物理网卡 0ms 死锁一切泄露。"
+    if (-not $Silent) { Install-WatchdogTask }
+
+    if ($Mode -eq 'strict') {
+        Update-HostsManagedBlock $resolved.Hosts
+        Disable-ClaudeProcessLock
+        Clear-DnsClientCache -ErrorAction SilentlyContinue
+        if (-not $Silent) { Write-Output "OK:一级安全锁已开启！一切公网流量 100% 强制只走代理 TUN (入口=$($cfg.entryNodes))，Claude 已安全放行。" }
+    } elseif ($Mode -eq 'cn') {
+        Clear-DnsClientCache -ErrorAction SilentlyContinue
+        if (-not $Silent) { Write-Output 'OK:已退出 Claude 并切回国内白名单网络！一切海外与 Claude 遥测持续 0ms 阻断，Claude 全版本进程已锁死。' }
+    } else {
+        Clear-DnsClientCache -ErrorAction SilentlyContinue
+        if (-not $Silent) { Write-Output 'OK:二级放宽锁已打开（防未收录国内流量误伤）！⚠️ 请严禁打开任何 Claude 服务及点击任何 Claude 邮件链接（底层进程锁与遥测黑洞仍持续保护中）。' }
+    }
 }
 
-# 关闭安全锁 (日常模式): 系统内核级 IFEO 锁死 Claude.exe + hosts 遥测黑洞 + WFP 永久阻断 Claude ASN/遥测/进程！
-function Invoke-Standby($cfg) {
-    if (-not (Test-IsAdmin)) {
-        Write-Output 'FAIL:切换日常模式需要管理员权限'
-        exit 1
-    }
-    $fwErr = Ensure-FirewallProfilesEnabled
-    if ($fwErr) { Write-Output $fwErr; exit 1 }
-
-    Write-Output '正在强制终止运行中的 Claude 桌面版、更新器与 CLI...'
-    Stop-ClaudeSafely
-    # 1. 先扣死 Windows 内核级 IFEO 进程锁 (点开 Claude 0ms 弹窗，真进程绝不启动!)
-    Enable-ClaudeProcessLock
-    # 2. 写入 hosts 全部 24 个 Claude 主站与遥测域名黑洞 (连浏览器手抖点网页版都不发本地 DNS)
-    Update-HostsManagedBlock (Get-ClaudeBlackholeHostsLines)
-
-    # 3. Zero-Gap 原子切换 WFP 防火墙为「永久 Claude & 遥测物理拦截防线」(放行日常普通上网，但永不放行 Claude 直连!)
-    $tun = Get-TunInfo
-    $localExcludes = New-Object System.Collections.Generic.List[string]
-    $localExcludes.Add('127.0.0.0/8'); $localExcludes.Add('172.18.0.0/15'); $localExcludes.Add('198.18.0.0/15')
-    foreach ($tip in $tun.TunIps) { $localExcludes.Add("$tip/32") }
-    $nonTunLocalV4 = Get-ComplementIpv4Ranges @($localExcludes)
-    $publicRemoteV4 = Get-ComplementIpv4Ranges @('10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')
-    $claudeV4 = Resolve-ClaudeBlockV4 @()
-
-    $oldRules = @(Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue)
-    $gen = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString()
-
-    New-NetFirewallRule -DisplayName 'ClaudeGuard[永久防线]: 物理网卡永久死锁 Claude ASN 与全系遥测 IP (IPv4)' `
-        -Name "ClaudeGuard-Standby-Claude-V4-$gen" `
-        -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
-        -LocalAddress $nonTunLocalV4 -RemoteAddress $claudeV4 | Out-Null
-
-    New-NetFirewallRule -DisplayName 'ClaudeGuard[永久防线]: 物理网卡永久死锁 Anthropic IPv6' `
-        -Name "ClaudeGuard-Standby-Claude-V6-$gen" `
-        -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
-        -RemoteAddress $ANTHROPIC_ASN_V6 | Out-Null
-
-    $appIdx = 0
-    foreach ($exe in (Get-ProtectedClaudeExes)) {
-        $appIdx++
-        New-NetFirewallRule -DisplayName "ClaudeGuard[永久防线]: 永久死锁目标应用物理直连 #$appIdx (IPv4)" `
-            -Name "ClaudeGuard-Block-TargetApp-V4-$appIdx-$gen" `
-            -Group $FW_GROUP -Direction Outbound -Action Block -Profile Any -Enabled True `
-            -Program $exe -LocalAddress $nonTunLocalV4 -RemoteAddress $publicRemoteV4 | Out-Null
-    }
-
-    if ($oldRules.Count -gt 0) { $oldRules | Remove-NetFirewallRule -ErrorAction SilentlyContinue }
-
-    $cfg.lockMode = 'standby'
-    Save-Config $cfg
-    Clear-DnsClientCache -ErrorAction SilentlyContinue
-    Write-Output 'OK:已切换为日常上网模式！Claude 已被系统内核锁死（点开将弹出提示），且物理网卡与 hosts 永久阻断 Claude 及遥测服务器，重启不失效。'
-}
-
-# 彻底卸载 (仅由「卸载.bat」调用)
 function Invoke-UninstallAll {
-    if (-not (Test-IsAdmin)) {
-        Write-Output 'FAIL:彻底卸载需要管理员权限'
-        exit 1
-    }
+    if (-not (Test-IsAdmin)) { Write-Output 'FAIL:彻底卸载需要管理员权限'; exit 1 }
+    $cfg = Load-Config; $cfg.lockMode = 'off'; Save-Config $cfg
+    Uninstall-WatchdogTask
     Stop-ClaudeSafely
     Disable-ClaudeProcessLock
     Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
     Update-HostsManagedBlock @()
-    $cfg = Load-Config
-    $cfg.lockMode = 'off'
-    Save-Config $cfg
     Clear-DnsClientCache -ErrorAction SilentlyContinue
-    Write-Output 'OK:已彻底解除所有系统级进程锁与防火墙规则，电脑已完全恢复出厂状态。'
+    Write-Output 'OK:已彻底解除所有系统级进程锁、自愈守卫与防火墙规则，电脑已完全恢复出厂状态。'
 }
 
 function Invoke-VerifyFirewall {
-    Write-Output '=== 操作系统防火墙、内核进程锁与流量拦截日志验收 (Windows Defender Firewall) ==='
+    Write-Output '=== 操作系统防火墙、全版本进程守卫与流量拦截日志验收 (Windows) ==='
     Write-Output ("时间: " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
     Write-Output ('-' * 64)
 
     $profiles = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue)
     $allEnabled = $true
-    Write-Output '[1] 系统防火墙配置文件状态 (Domain / Private / Public):'
+    Write-Output '[1] 系统防火墙配置档 (Domain / Private / Public):'
     foreach ($p in $profiles) {
-        Write-Output ("    - {0,-8}: Enabled={1}, LogBlocked={2}, LogFile={3}" -f $p.Name, $p.Enabled, $p.LogBlocked, $p.LogFileName)
+        Write-Output ("    - {0,-8}: Enabled={1}, LogBlocked={2}" -f $p.Name, $p.Enabled, $p.LogBlocked)
         if (-not $p.Enabled) { $allEnabled = $false }
     }
 
     $ifeoOn = Test-ClaudeProcessLocked
-    $ifeoText = if ($ifeoOn) { '已锁死 (日常模式，点开 Claude.exe 0ms 弹窗拦截，真进程绝不启动)' } else { '已放行 (安全锁开启中，仅允许走海外 TUN)' }
-    Write-Output "[2] Windows 内核级 IFEO 进程锁 (Claude.exe): $ifeoText"
+    $wdTask = Get-ScheduledTask -TaskName $WATCHDOG_TASK -ErrorAction SilentlyContinue
+    $wdStr  = if ($wdTask) { "已注册 ($($wdTask.State))" } else { '未注册' }
+    Write-Output "[2] 全版本免维护进程锁: IFEO=$(if ($ifeoOn) { '已锁死' } else { '工作态放行' }) | SYSTEM自愈守卫($WATCHDOG_TASK)=$wdStr"
 
     $rules = @(Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' -and $_.Action -eq 'Block' })
     $asnCnt = @($rules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Claude-*' -or $_.Name -like 'ClaudeGuard-Standby-Claude-*' }).Count
-    $appCnt = @($rules | Where-Object { $_.Name -like 'ClaudeGuard-Block-TargetApp-*' }).Count
-    $ovCnt  = @($rules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Overseas-*' -or $_.Name -like 'ClaudeGuard-Block-Strict-*' }).Count
-    $v6Cnt  = @($rules | Where-Object { $_.Name -like 'ClaudeGuard-Block-All-Public-V6*' -or $_.Name -like 'ClaudeGuard-Standby-Claude-V6*' }).Count
+    Write-Output "[3] 持久化规则组 ($FW_GROUP): 共 $($rules.Count) 条启用中的 Block 规则 (Claude/遥测核心锁=$asnCnt 条)"
 
-    Write-Output "[3] 持久化硬锁规则组 ($FW_GROUP): 共 $($rules.Count) 条启用中的 Block 规则"
-    Write-Output "    - Claude ASN/全系遥测 IP 死锁: $asnCnt 条 | 目标应用进程锁: $appCnt 条"
-    Write-Output "    - 海外公网/全封闭分片: $ovCnt 条 | IPv6 死锁: $v6Cnt 条"
-
-    Write-Output "[4] 操作系统防火墙真实拦截流量日志 ($PFW_LOG 最近 12 条 DROP):"
+    Write-Output "[4] 防火墙真实拦截流量日志 ($PFW_LOG 最近 10 条 DROP):"
     if (Test-Path -LiteralPath $PFW_LOG) {
-        $drops = @(Get-Content -LiteralPath $PFW_LOG -Tail 200 -ErrorAction SilentlyContinue | Where-Object { $_ -match '\sDROP\s' } | Select-Object -Last 12)
-        if ($drops.Count -gt 0) {
-            foreach ($d in $drops) { Write-Output "    $d" }
-        } else {
-            Write-Output '    (日志文件存在，暂无新 DROP 记录 —— 可断开代理后尝试访问 160.79.104.10 再点本按钮查看实时 DROP)'
-        }
-    } else {
-        Write-Output '    (产生首次拦截后系统自动生成日志文件)'
-    }
+        $drops = @(Get-Content -LiteralPath $PFW_LOG -Tail 200 -ErrorAction SilentlyContinue | Where-Object { $_ -match '\sDROP\s' } | Select-Object -Last 10)
+        if ($drops.Count -gt 0) { foreach ($d in $drops) { Write-Output "    $d" } }
+        else { Write-Output '    (暂无新 DROP 记录)' }
+    } else { Write-Output '    (产生首次拦截后自动生成)' }
 
     Write-Output ('-' * 64)
     if ($allEnabled -and $rules.Count -ge 2 -and $asnCnt -ge 1) {
-        Write-Output '验收结论: [✓] 操作系统防火墙硬锁已实装生效，Claude 绝不可能绕过 TUN 泄露'
+        Write-Output '验收结论: [✓] 操作系统防火墙硬锁与自愈守卫已实装生效'
     } else {
-        Write-Output '验收结论: [✗] 操作系统防火墙未处于锁定状态（请检查是否被杀软关闭或尚未初始化）'
+        Write-Output '验收结论: [✗] 操作系统防火墙未处于锁定状态'
         exit 1
     }
 }
@@ -704,34 +754,27 @@ switch ($Action) {
         if ([string]::IsNullOrWhiteSpace($Nodes)) {
             $cfg.entryNodes = ''
             Save-Config $cfg
-            Write-Output 'OK:已清空海外入口白名单(国内中转机仍自动放行)'
+            Write-Output 'OK:已清空手动入口节点配置(开锁时将自动探测当前活跃代理入口 IP)'
             exit 0
         }
         $r = Resolve-EntryNodes $Nodes
         if ($r.Cidrs.Count -eq 0) { Write-Output "FAIL:未能从输入解析出有效 IPv4 ($Nodes)"; exit 1 }
         $cfg.entryNodes = $Nodes.Trim()
         Save-Config $cfg
-        Write-Output "OK:已保存海外入口白名单 ($($cfg.entryNodes))"
+        Write-Output "OK:已保存第一跳入口白名单 ($($cfg.entryNodes))"
     }
-    'set-strict' {
-        $cfg.strictMode = ($Nodes -eq '1' -or $Nodes -eq 'true')
-        Save-Config $cfg
-        Write-Output ("OK:开锁策略已设为 " + ($(if ($cfg.strictMode) { '全封闭模式' } else { '放行国内直连(推荐)' })))
-    }
-    'lock' { Invoke-Lock $cfg '' }
-    'lock-cn' { Invoke-Lock $cfg 'cn' }
-    'lock-strict' { Invoke-Lock $cfg 'strict' }
-    'unlock' { Invoke-Standby $cfg }
+    'lock'          { Invoke-ApplyMode $cfg 'strict' $false }
+    'lock-strict'   { Invoke-ApplyMode $cfg 'strict' $false }
+    'unlock'        { Invoke-ApplyMode $cfg 'cn' $false }
+    'lock-cn'       { Invoke-ApplyMode $cfg 'cn' $false }
+    'relax'         { Invoke-ApplyMode $cfg 'standby' $false }
+    'write-emergency' { Write-EmergencyGuideToDesktop $Nodes; Write-Output 'OK:已在桌面生成本机专属《断网急救.txt》' }
+    'watchdog-loop' { Invoke-WatchdogLoop }
     'uninstall-all' { Invoke-UninstallAll }
     'verify-firewall' { Invoke-VerifyFirewall }
     'init' {
         if (-not (Test-IsAdmin)) { Write-Output 'FAIL:一键初始化需要管理员权限'; exit 1 }
-        $nodeArg = if ($Nodes) { $Nodes.Trim() } else { $cfg.entryNodes }
-        if ($nodeArg) {
-            $r = Resolve-EntryNodes $nodeArg
-            if ($r.Cidrs.Count -eq 0) { Write-Output "FAIL:无法解析代理入口节点: $nodeArg"; exit 1 }
-            $cfg.entryNodes = $nodeArg
-        }
+        if ($Nodes -and $Nodes.Trim()) { $cfg.entryNodes = $Nodes.Trim() }
         $cc = ''; $winTz = ''; $ip = ''
         if ($ManualCountry) {
             $cc = $ManualCountry.Trim().ToUpperInvariant()
@@ -741,7 +784,7 @@ switch ($Action) {
             $geo = Get-GeoInfo
             $cc = $geo.Country; $ip = $geo.Ip
             if (-not $cc -or @('CN', 'HK', 'MO') -contains $cc) {
-                Write-Output "FAIL:当前出口为 $(if ($cc) { $cc } else { '未知' })(IP=$ip)，属于不支持地区！请先开启 Clash Verge(服务模式+TUN) 或 v2rayN(管理员+启用Tun) 的全局代理后再初始化"
+                Write-Output "FAIL:当前出口为 $(if ($cc) { $cc } else { '未知' })(IP=$ip)，属于不支持地区！请先开启代理「全局 + TUN」切至海外支持地区后再初始化"
                 exit 1
             }
             if ($geo.IanaTz -and $IANA_TO_WIN.ContainsKey($geo.IanaTz)) { $winTz = $IANA_TO_WIN[$geo.IanaTz] }
@@ -758,20 +801,23 @@ switch ($Action) {
         foreach ($nic in @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })) {
             try { Disable-NetAdapterBinding -Name $nic.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {}
         }
-        Invoke-Lock $cfg ''
-        Write-Output "OK:一键初始化完成 | 出口=$cc($ip) | 时区=$winTz | 地区=$loc | Claude语言=en-US | 全网卡IPv6=已关闭 | 安全锁=已开启"
+        Write-EmergencyGuideToDesktop ''
+        Invoke-ApplyMode $cfg 'strict' $false
+        Write-Output "OK:一键初始化完成 | 出口=$cc($ip) | 时区=$winTz | 地区=$loc | 已在桌面生成《断网急救.txt》 | 一级安全锁(100%只走TUN)=已开启"
     }
     'status' {
         $rules = @(Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' })
-        $isActive = (@($rules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Overseas-*' -or $_.Name -like 'ClaudeGuard-Block-Strict-*' }).Count -gt 0)
-        $isStandby = (-not $isActive -and @($rules | Where-Object { $_.Name -like 'ClaudeGuard-Standby-Claude-*' }).Count -gt 0)
-        $mode = if ($isActive) { if (@($rules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Strict-*' }).Count -gt 0) { 'strict' } else { 'cn' } } elseif ($isStandby) { 'standby' } else { 'off' }
-        $lockSt = if ($isActive) { 'on' } elseif ($isStandby) { 'standby' } else { 'off' }
+        $isStrict  = (@($rules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Strict-*' }).Count -gt 0)
+        $isCn      = (-not $isStrict -and @($rules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Overseas-*' }).Count -gt 0)
+        $isStandby = (-not $isStrict -and -not $isCn -and @($rules | Where-Object { $_.Name -like 'ClaudeGuard-Standby-Claude-*' }).Count -gt 0)
+        $lockSt = if ($isStrict) { 'on' } elseif ($isCn) { 'cn' } elseif ($isStandby) { 'relax' } else { 'off' }
+        $mode   = if ($isStrict) { 'strict' } elseif ($isCn) { 'cn' } elseif ($isStandby) { 'standby' } else { 'off' }
         $procLocked = if (Test-ClaudeProcessLocked) { 'on' } else { 'off' }
+        $wdOn = if (Get-ScheduledTask -TaskName $WATCHDOG_TASK -ErrorAction SilentlyContinue) { 'on' } else { 'off' }
         Write-Output "LOCK=$lockSt"
         Write-Output "LOCK_MODE=$mode"
         Write-Output "PROC_LOCKED=$procLocked"
-        Write-Output "STRICT_MODE=$(if ($cfg.strictMode) { '1' } else { '0' })"
+        Write-Output "PERSISTENT_LOCK=$wdOn"
         Write-Output "ENTRY_NODES=$(if ($cfg.entryNodes) { $cfg.entryNodes } else { '未配置' })"
         Write-Output "COUNTRY_TARGET=$(if ($cfg.countryTarget) { $cfg.countryTarget } else { '未配置' })"
         Write-Output "TZ_TARGET=$(if ($cfg.tzTarget) { $cfg.tzTarget } else { '未配置' })"

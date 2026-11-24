@@ -136,7 +136,7 @@ class PortableKitTests(unittest.TestCase):
             CLAUDE_GUARD_DRY_RUN="1",
         )
 
-        # 1. 执行 unlock (日常模式): 必须锁死 Claude.app 和 CLI 并写入遥测 hosts 黑洞
+        # 1. 执行 unlock (关闭一级锁 -> 国内白名单直连态): 必须锁死 Claude.app 和 CLI 并写入 34 个主站/遥测/邮件链接黑洞
         r1 = subprocess.run(["/bin/bash", str(MAC_GUARD), "unlock"], env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
         self.assertTrue((fake_claude / ".claude-guard-blocker").is_file(), "原位应部署占位拦截器")
@@ -145,41 +145,51 @@ class PortableKitTests(unittest.TestCase):
         self.assertEqual(hidden_bin.read_bytes(), orig_app_bytes, "真实应用字节必须零篡改")
         self.assertFalse(os.access(hidden_bin, os.X_OK), "藏匿的真实二进制必须被 chmod a-x 剥夺执行位")
 
-        # 占位器 Info.plist 必须通过 plutil -lint
         r_pl = subprocess.run(["plutil", "-lint", str(fake_claude / "Contents" / "Info.plist")], capture_output=True, text=True)
         self.assertEqual(r_pl.returncode, 0, r_pl.stdout + r_pl.stderr)
 
-        # CLI 必须已被占位拦截，且原 CLI 无损藏匿并失去执行位
         self.assertIn("CLAUDE_GUARD_CLI_BLOCKER", fake_cli.read_text(encoding="utf-8"))
         hidden_cli = fake_cli_dir / ".claude-guard-real-claude"
         self.assertEqual(hidden_cli.read_bytes(), orig_cli_bytes)
         self.assertFalse(os.access(hidden_cli, os.X_OK))
 
-        # hosts 必须包含全部核心与遥测域名黑洞
+        # hosts 必须包含主站、全系遥测与邮件跳转域名黑洞
         hosts_txt = hosts.read_text(encoding="utf-8")
-        for dom in ("claude.ai", "api.anthropic.com", "statsig.anthropic.com", "o1158394.ingest.us.sentry.io", "statsigapi.net", "featuregates.org"):
+        for dom in ("claude.ai", "claudemcpclient.com", "links.claude.ai", "mail.anthropic.com", "statsig.anthropic.com", "o1158394.ingest.us.sentry.io", "browser-intake-datadoghq.com"):
             self.assertIn(f"0.0.0.0 {dom}", hosts_txt)
 
-        # 2. 幂等校验: 连续第二次执行 unlock，绝对不能覆写损坏藏匿的真实 Claude.app!
-        r2 = subprocess.run(["/bin/bash", str(MAC_GUARD), "unlock"], env=env, capture_output=True, text=True, timeout=15)
+        # 2. 切换二级放宽锁 (relax): 幂等不损坏藏匿应用，底层进程锁与遥测黑洞必须继续保持!
+        r2 = subprocess.run(["/bin/bash", str(MAC_GUARD), "relax"], env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertTrue((fake_claude / ".claude-guard-blocker").is_file())
         self.assertEqual(hidden_bin.read_bytes(), orig_app_bytes)
         self.assertEqual(hidden_cli.read_bytes(), orig_cli_bytes)
+        self.assertIn("0.0.0.0 links.claude.ai", hosts.read_text(encoding="utf-8"))
 
-        # 3. 开启安全锁 (lock): 必须 100% 无损还原真实 Claude.app 与 CLI 并恢复执行权限
+        # 3. 先配置第一跳入口 IP，再开启一级安全锁 (lock -> 100% 流量强制只走 TUN): 必须 100% 无损还原真实 Claude.app 与 CLI 并移除黑洞
+        rs = subprocess.run(["/bin/bash", str(MAC_GUARD), "set-nodes", "203.0.113.10"], env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(rs.returncode, 0, rs.stdout + rs.stderr)
         r3 = subprocess.run(["/bin/bash", str(MAC_GUARD), "lock"], env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(r3.returncode, 0, r3.stdout + r3.stderr)
+        self.assertIn("mode=strict", r3.stdout)
         self.assertFalse((fake_claude / ".claude-guard-blocker").exists())
         self.assertFalse((fake_apps / ".Claude-Locked.app").exists())
         self.assertEqual(fake_bin.read_bytes(), orig_app_bytes)
-        self.assertTrue(os.access(fake_bin, os.X_OK), "开锁后真实 Claude.app 必须恢复可执行权限")
+        self.assertTrue(os.access(fake_bin, os.X_OK), "开一级锁后真实 Claude.app 必须恢复可执行权限")
         self.assertEqual(fake_cli.read_bytes(), orig_cli_bytes)
-        self.assertTrue(os.access(fake_cli, os.X_OK), "开锁后真实 claude CLI 必须恢复可执行权限")
+        self.assertTrue(os.access(fake_cli, os.X_OK), "开一级锁后真实 claude CLI 必须恢复可执行权限")
+        self.assertNotIn("0.0.0.0 claude.ai", hosts.read_text(encoding="utf-8"))
 
-        # 验证自愈开机守护逻辑存在于脚本中
+        # 4. 验证专属断网急救指南生成
+        emg_file = self.root / "断网急救.txt"
+        r4 = subprocess.run(["/bin/bash", str(MAC_GUARD), "write-emergency", str(emg_file)], env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(r4.returncode, 0)
+        self.assertIn("networksetup", emg_file.read_text(encoding="utf-8"))
+
         guard_text = MAC_GUARD.read_text(encoding="utf-8")
-        self.assertIn("install_pf_boot_daemon_root()", guard_text)
-        self.assertIn("Claude Helper", guard_text)
+        self.assertIn("<key>KeepAlive</key><true/>", guard_text)
+        self.assertIn("_root-relock-apps", guard_text)
+        self.assertIn("100.64.0.0/10", guard_text)
 
     def test_windows_scripts_bom_lf_ifeo_telemetry_and_single_lock_ui(self):
         for p in (WIN_GUARD, WIN_AUDIT, WIN_UI):
@@ -235,18 +245,22 @@ class PortableKitTests(unittest.TestCase):
         x_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
         names = [node.get(x_name) for node in root.iter() if node.get(x_name)]
         self.assertEqual(len(names), len(set(names)), "XAML x:Name 不得重复")
-        for ctrl in ("StatusPill", "StatusDot", "StatusText", "StatusSub", "BtnToggleLock", "ToggleTitle", "ToggleDesc", "ChkStrictMode", "NodesInput", "BtnSaveNodes", "BtnInit", "BtnTabDash", "BtnTabLog", "LampGrid", "BtnVerifyFw", "BtnCheck", "BtnExport", "OutputBox"):
+        for ctrl in ("StatusPill", "StatusDot", "StatusText", "StatusSub", "RelaxWarnBanner", "BtnToggleLock", "ToggleTitle", "ToggleDesc", "BtnRelaxLock", "NodesInput", "BtnSaveNodes", "BtnInit", "BtnTabDash", "BtnTabLog", "LampGrid", "BtnEmergency", "BtnVerifyFw", "BtnCheck", "BtnExport", "OutputBox"):
             self.assertIn(ctrl, names)
             self.assertIn(f"FindName('{ctrl}')", ui_text)
         self.assertIn("#FFFAF9F5", ui_text, "Windows UI 必须采用 Claude 暖米纸主题")
         self.assertIn("#FFD97757", ui_text, "Windows UI 必须采用 Claude 陶土橙主色")
-        self.assertNotIn("BtnUnlockAll", names, "极简单锁主界面不得暴露解除永久锁的误触按钮")
+        self.assertIn("电子邮件", ui_text, "二级放宽锁必须警告切勿点击 Claude 电子邮件与链接")
+        self.assertIn("电子邮件", (KIT / "mac" / "ClaudeGuardApp.swift").read_text(encoding="utf-8"))
+        self.assertIn("ClaudeGuard-Watchdog", guard_text)
+        self.assertIn("claudemcpclient.com", guard_text)
+        self.assertIn("100.64.0.0/10", guard_text)
 
     def test_mac_14_dim_env_audit_active_and_standby_modes(self):
         pf_conf = self.root / "pf.conf"
         pf_conf.write_text('# BEGIN claude-guard-pf\nanchor "com.claude-guard"\n# END claude-guard-pf\n', encoding="utf-8")
         anchor = self.root / "com.claude-guard"
-        anchor.write_text("# mode=cn\nblock drop out log quick inet all\n", encoding="utf-8")
+        anchor.write_text("# mode=strict\nblock drop out log quick inet all\n", encoding="utf-8")
         boot_plist = self.root / "com.claude-guard.pfboot.plist"
         boot_plist.write_text("<plist/>", encoding="utf-8")
         cfg = self.root / "config.env"

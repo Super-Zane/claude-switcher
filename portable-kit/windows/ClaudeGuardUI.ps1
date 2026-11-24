@@ -1,4 +1,4 @@
-﻿# Claude 持久化安全锁 · Windows Claude 品牌暖米风格 WPF 亮灯控制台 (零依赖)
+﻿# Claude 持久化安全锁 · Windows Claude 品牌暖米风格三态防呆亮灯控制台 (v2.2)
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
@@ -11,7 +11,7 @@ $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Claude 安全锁"
-        Width="860" Height="730" MinWidth="760" MinHeight="640"
+        Width="880" Height="760" MinWidth="780" MinHeight="660"
         WindowStartupLocation="CenterScreen"
         Background="#FFFAF9F5" Foreground="#FF1F1E1D" FontFamily="Microsoft YaHei UI, Segoe UI">
     <Window.Resources>
@@ -42,8 +42,9 @@ $xaml = @"
         </Style>
     </Window.Resources>
 
-    <Grid Margin="22,18,22,16">
+    <Grid Margin="22,16,22,14">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -51,7 +52,7 @@ $xaml = @"
         </Grid.RowDefinitions>
 
         <!-- 顶部 Claude 品牌 Header -->
-        <Grid Grid.Row="0" Margin="0,0,0,14">
+        <Grid Grid.Row="0" Margin="0,0,0,12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
@@ -64,10 +65,10 @@ $xaml = @"
                 <StackPanel Orientation="Horizontal">
                     <TextBlock Text="Claude 安全锁" FontSize="19" FontWeight="Bold" Foreground="#FF1F1E1D"/>
                     <Border Background="#1FD97757" CornerRadius="8" Padding="6,2" Margin="8,0,0,0" VerticalAlignment="Center">
-                        <TextBlock Text="v2.1" FontSize="10.5" FontWeight="SemiBold" Foreground="#FFD97757"/>
+                        <TextBlock Text="v2.2" FontSize="10.5" FontWeight="SemiBold" Foreground="#FFD97757"/>
                     </Border>
                 </StackPanel>
-                <TextBlock x:Name="StatusSub" Text="正在读取操作系统防火墙与内核进程锁状态..." FontSize="11.5" Foreground="#FF6B665E" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="StatusSub" Text="正在读取操作系统防火墙与全版本进程守卫状态..." FontSize="11.5" Foreground="#FF6B665E" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
             </StackPanel>
             <Border x:Name="StatusPill" Grid.Column="2" VerticalAlignment="Center" CornerRadius="14" Padding="12,6" Background="#FFF1F2F4">
                 <StackPanel Orientation="Horizontal">
@@ -77,8 +78,13 @@ $xaml = @"
             </Border>
         </Grid>
 
-        <!-- 主控卡片 -->
-        <Border Grid.Row="1" Background="#FFFFFFFF" BorderBrush="#FFE7E2D8" BorderThickness="1" CornerRadius="14" Padding="14">
+        <!-- 二级放宽锁高危红幅警示条 -->
+        <Border x:Name="RelaxWarnBanner" Grid.Row="1" Visibility="Collapsed" Background="#FFFEE2E2" BorderBrush="#FFFCA5A5" BorderThickness="1" CornerRadius="10" Padding="12,8" Margin="0,0,0,10">
+            <TextBlock Text="🚨 高危提醒：此时电脑没有全网防护！请不要打开任何与 Claude 相关的服务，包括电子邮件里不要点击 Claude 发来的任何电子邮件和链接！（底层 Claude 全版本进程锁与遥测黑洞仍在保护中）" FontSize="11.5" FontWeight="Bold" Foreground="#FFDC2626" TextWrapping="Wrap"/>
+        </Border>
+
+        <!-- 主控卡片: 一级安全锁 + 一键初始化 + 入口IP + 二级放宽锁 -->
+        <Border Grid.Row="2" Background="#FFFFFFFF" BorderBrush="#FFE7E2D8" BorderThickness="1" CornerRadius="14" Padding="13">
             <StackPanel>
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -87,14 +93,14 @@ $xaml = @"
                     </Grid.ColumnDefinitions>
                     <Button x:Name="BtnToggleLock" Grid.Column="0" Style="{StaticResource AccentBtn}" MinHeight="52" HorizontalContentAlignment="Left" Padding="16,10">
                         <StackPanel>
-                            <TextBlock x:Name="ToggleTitle" Text="🔒 开启安全锁（启用内核防泄露硬锁并解锁 Claude）" FontSize="13.5" FontWeight="Bold" Foreground="#FFFFFFFF"/>
-                            <TextBlock x:Name="ToggleDesc" Text="开启后 Claude 只能走海外 TUN，代理退出/重启/死机 0ms 零泄露" FontSize="10.5" Foreground="#FFFDF6F3" Margin="0,2,0,0"/>
+                            <TextBlock x:Name="ToggleTitle" Text="🔒 开启一级安全锁（100% 流量强制只走 TUN · 解锁 Claude）" FontSize="13.5" FontWeight="Bold" Foreground="#FFFFFFFF"/>
+                            <TextBlock x:Name="ToggleDesc" Text="配合代理全局 + TUN 使用，物理网卡一切国内外公网/裸DNS/IPv6/STUN 全部 0ms 拦截" FontSize="10.5" Foreground="#FFFDF6F3" Margin="0,2,0,0"/>
                         </StackPanel>
                     </Button>
-                    <Button x:Name="BtnInit" Grid.Column="1" Style="{StaticResource SoftBtn}" Background="#FFF3EFE6" Width="116" MinHeight="52" Margin="10,0,0,0" Content="✨ 一键初始化"/>
+                    <Button x:Name="BtnInit" Grid.Column="1" Style="{StaticResource SoftBtn}" Background="#FFF3EFE6" Width="112" MinHeight="52" Margin="10,0,0,0" Content="✨ 一键初始化"/>
                 </Grid>
 
-                <Border Height="1" Background="#FFE7E2D8" Margin="0,12,0,10"/>
+                <Border Height="1" Background="#FFE7E2D8" Margin="0,11,0,10"/>
 
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -103,10 +109,10 @@ $xaml = @"
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="代理入口白名单" FontSize="12" FontWeight="SemiBold" Foreground="#FF1F1E1D" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                    <TextBox x:Name="NodesInput" Grid.Column="1" Background="#FFFAF9F5" Foreground="#FF1F1E1D" BorderBrush="#FFE7E2D8" BorderThickness="1" Padding="8,5" FontSize="12" VerticalContentAlignment="Center" ToolTip="国内中转链式代理可留空；直连海外 VPS 或全封闭模式填第一跳 IP（逗号分隔）"/>
-                    <Button x:Name="BtnSaveNodes" Grid.Column="2" Style="{StaticResource SoftBtn}" Background="#FFF3EFE6" Content="保存" MinHeight="30" Padding="12,4" Margin="8,0,12,0"/>
-                    <CheckBox x:Name="ChkStrictMode" Grid.Column="3" Content="全封闭模式" Foreground="#FF1F1E1D" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" ToolTip="勾选后开启安全锁时连国内公网与物理裸 DNS 53 也一并封锁"/>
+                    <TextBlock Grid.Column="0" Text="第一跳入口 IP" FontSize="12" FontWeight="SemiBold" Foreground="#FF1F1E1D" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBox x:Name="NodesInput" Grid.Column="1" Background="#FFFAF9F5" Foreground="#FF1F1E1D" BorderBrush="#FFE7E2D8" BorderThickness="1" Padding="8,5" FontSize="12" VerticalContentAlignment="Center" ToolTip="留空自动识别当前活跃代理连接 IP；或手动填写第一跳节点 IP（逗号分隔）"/>
+                    <Button x:Name="BtnSaveNodes" Grid.Column="2" Style="{StaticResource SoftBtn}" Background="#FFF3EFE6" Content="保存" MinHeight="30" Padding="12,4" Margin="8,0,10,0"/>
+                    <Button x:Name="BtnRelaxLock" Grid.Column="3" Style="{StaticResource SoftBtn}" Background="#FFFEE2E2" BorderBrush="#FFFCA5A5" Foreground="#FFDC2626" Content="⚠ 二级放宽锁（防国内误伤）" MinHeight="30" Padding="12,4"/>
                 </Grid>
 
                 <Border x:Name="ToastBar" Visibility="Collapsed" Background="#FFF3EFE6" CornerRadius="8" Padding="10,6" Margin="0,10,0,0">
@@ -115,8 +121,8 @@ $xaml = @"
             </StackPanel>
         </Border>
 
-        <!-- 工具栏: 亮灯视图切换 + 汇总 + 一键体检/验收/导出 -->
-        <Grid Grid.Row="2" Margin="0,14,0,10">
+        <!-- 工具栏 -->
+        <Grid Grid.Row="3" Margin="0,12,0,10">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
@@ -127,25 +133,26 @@ $xaml = @"
                 <Button x:Name="BtnTabDash" Style="{StaticResource AccentBtn}" Content="亮灯仪表盘" MinHeight="32" Padding="12,4"/>
                 <Button x:Name="BtnTabLog" Style="{StaticResource SoftBtn}" Content="防火墙与执行日志" MinHeight="32" Padding="12,4" Margin="6,0,0,0"/>
             </StackPanel>
-            <Border x:Name="SummaryBadge" Grid.Column="1" Visibility="Collapsed" Background="#FFF3EFE6" CornerRadius="10" Padding="10,4" Margin="12,0,0,0" VerticalAlignment="Center">
-                <TextBlock x:Name="SummaryText" Text="" FontSize="11.5" FontWeight="SemiBold" Foreground="#FF1F1E1D"/>
+            <Border x:Name="SummaryBadge" Grid.Column="1" Visibility="Collapsed" Background="#FFF3EFE6" CornerRadius="10" Padding="10,4" Margin="10,0,0,0" VerticalAlignment="Center">
+                <TextBlock x:Name="SummaryText" Text="" FontSize="11" FontWeight="SemiBold" Foreground="#FF1F1E1D"/>
             </Border>
             <StackPanel Grid.Column="3" Orientation="Horizontal">
-                <Button x:Name="BtnVerifyFw" Style="{StaticResource SoftBtn}" Content="🛡 验收防火墙日志" MinHeight="32" Margin="0,0,8,0"/>
-                <Button x:Name="BtnExport" Style="{StaticResource SoftBtn}" Content="📄 导出报告" MinHeight="32" Margin="0,0,8,0"/>
+                <Button x:Name="BtnEmergency" Style="{StaticResource SoftBtn}" Content="🚑 急救指南" MinHeight="32" Margin="0,0,6,0"/>
+                <Button x:Name="BtnVerifyFw" Style="{StaticResource SoftBtn}" Content="🛡 验收防火墙日志" MinHeight="32" Margin="0,0,6,0"/>
+                <Button x:Name="BtnExport" Style="{StaticResource SoftBtn}" Content="📄 导出报告" MinHeight="32" Margin="0,0,6,0"/>
                 <Button x:Name="BtnCheck" Style="{StaticResource AccentBtn}" Content="⚡ 一键全面体检" MinHeight="32"/>
             </StackPanel>
         </Grid>
 
         <!-- 下半区: 14 项亮灯卡片网格 / 日志视图 -->
-        <ScrollViewer x:Name="DashScroll" Grid.Row="3" VerticalScrollBarVisibility="Auto">
+        <ScrollViewer x:Name="DashScroll" Grid.Row="4" VerticalScrollBarVisibility="Auto">
             <UniformGrid x:Name="LampGrid" Columns="2" VerticalAlignment="Top"/>
         </ScrollViewer>
 
-        <Border x:Name="LogPanel" Grid.Row="3" Visibility="Collapsed" Background="#FFFFFFFF" BorderBrush="#FFE7E2D8" BorderThickness="1" CornerRadius="12" Padding="12">
+        <Border x:Name="LogPanel" Grid.Row="4" Visibility="Collapsed" Background="#FFFFFFFF" BorderBrush="#FFE7E2D8" BorderThickness="1" CornerRadius="12" Padding="12">
             <TextBox x:Name="OutputBox" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
                      Background="Transparent" Foreground="#FF1F1E1D" BorderThickness="0"
-                     FontFamily="Consolas" FontSize="12" Text="欢迎使用 Claude 持久化安全锁！&#x0A;&#x0A;• 首次交付：在 Clash Verge(服务模式+TUN) 或 v2rayN(管理员+启用Tun) 开启「全局 + TUN」，点击「一键初始化」。&#x0A;• 亮灯验收：点击「一键全面体检」，14 项环境指标实时亮灯通过。&#x0A;• 永久防呆：关闭安全锁切回日常上网时，Claude 将从内核 IFEO 锁死（点开弹提示）并黑洞 25 个遥测域名。"/>
+                     FontFamily="Consolas" FontSize="12" Text="欢迎使用 Claude 持久化安全锁 v2.2！&#x0A;&#x0A;• 首次交付：开启 Clash Verge(服务模式+TUN+全局) 或 v2rayN(管理员+启用Tun+全局)，点击「一键初始化」。&#x0A;• 一级安全锁开启：100% 公网流量强制只走 TUN，安心使用 Claude。&#x0A;• 一级安全锁关闭：弹窗确认并自动退出 Claude，切回国内白名单直连网络，持续死锁海外与 Claude 全版本进程。&#x0A;• 二级放宽锁：仅当国内未收录流量被误伤时使用（底层 Claude 全版本进程与 34 个遥测/邮件链接黑洞依然永久锁定）。"/>
         </Border>
     </Grid>
 </Window>
@@ -154,34 +161,35 @@ $xaml = @"
 $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $win = [Windows.Markup.XamlReader]::Load($reader)
 
-$statusPill    = $win.FindName('StatusPill')
-$statusDot     = $win.FindName('StatusDot')
-$statusText    = $win.FindName('StatusText')
-$statusSub     = $win.FindName('StatusSub')
-$btnToggleLock = $win.FindName('BtnToggleLock')
-$toggleTitle   = $win.FindName('ToggleTitle')
-$toggleDesc    = $win.FindName('ToggleDesc')
-$btnInit       = $win.FindName('BtnInit')
-$nodesInput    = $win.FindName('NodesInput')
-$btnSave       = $win.FindName('BtnSaveNodes')
-$chkStrictMode = $win.FindName('ChkStrictMode')
-$toastBar      = $win.FindName('ToastBar')
-$toastText     = $win.FindName('ToastText')
-$btnTabDash    = $win.FindName('BtnTabDash')
-$btnTabLog     = $win.FindName('BtnTabLog')
-$summaryBadge  = $win.FindName('SummaryBadge')
-$summaryText   = $win.FindName('SummaryText')
-$btnVerifyFw   = $win.FindName('BtnVerifyFw')
-$btnExport     = $win.FindName('BtnExport')
-$btnCheck      = $win.FindName('BtnCheck')
-$dashScroll    = $win.FindName('DashScroll')
-$lampGrid      = $win.FindName('LampGrid')
-$logPanel      = $win.FindName('LogPanel')
-$outputBox     = $win.FindName('OutputBox')
+$statusPill      = $win.FindName('StatusPill')
+$statusDot       = $win.FindName('StatusDot')
+$statusText      = $win.FindName('StatusText')
+$statusSub       = $win.FindName('StatusSub')
+$relaxWarnBanner = $win.FindName('RelaxWarnBanner')
+$btnToggleLock   = $win.FindName('BtnToggleLock')
+$toggleTitle     = $win.FindName('ToggleTitle')
+$toggleDesc      = $win.FindName('ToggleDesc')
+$btnInit         = $win.FindName('BtnInit')
+$nodesInput      = $win.FindName('NodesInput')
+$btnSave         = $win.FindName('BtnSaveNodes')
+$btnRelaxLock    = $win.FindName('BtnRelaxLock')
+$toastBar        = $win.FindName('ToastBar')
+$toastText       = $win.FindName('ToastText')
+$btnTabDash      = $win.FindName('BtnTabDash')
+$btnTabLog       = $win.FindName('BtnTabLog')
+$summaryBadge    = $win.FindName('SummaryBadge')
+$summaryText     = $win.FindName('SummaryText')
+$btnEmergency    = $win.FindName('BtnEmergency')
+$btnVerifyFw     = $win.FindName('BtnVerifyFw')
+$btnExport       = $win.FindName('BtnExport')
+$btnCheck        = $win.FindName('BtnCheck')
+$dashScroll      = $win.FindName('DashScroll')
+$lampGrid        = $win.FindName('LampGrid')
+$logPanel        = $win.FindName('LogPanel')
+$outputBox       = $win.FindName('OutputBox')
 
-$allBtns = @($btnToggleLock, $btnInit, $btnSave, $btnVerifyFw, $btnExport, $btnCheck)
+$allBtns = @($btnToggleLock, $btnInit, $btnSave, $btnRelaxLock, $btnEmergency, $btnVerifyFw, $btnExport, $btnCheck)
 $script:currentLock = 'off'
-$script:suppressStrictEvent = $false
 
 function New-Brush([string]$Hex) {
     return (New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($Hex)))
@@ -191,11 +199,9 @@ function Show-Toast([string]$Msg, [bool]$IsError = $false) {
     $toastBar.Visibility = [Windows.Visibility]::Visible
     $toastText.Text = $Msg
     if ($IsError) {
-        $toastBar.Background = New-Brush '#FFFEE2E2'
-        $toastText.Foreground = New-Brush '#FFDC2626'
+        $toastBar.Background = New-Brush '#FFFEE2E2'; $toastText.Foreground = New-Brush '#FFDC2626'
     } else {
-        $toastBar.Background = New-Brush '#FFF3EFE6'
-        $toastText.Foreground = New-Brush '#FF1F1E1D'
+        $toastBar.Background = New-Brush '#FFF3EFE6'; $toastText.Foreground = New-Brush '#FF1F1E1D'
     }
 }
 
@@ -224,8 +230,7 @@ function Render-AuditCards($Items) {
         elseif ($st -eq 'unknown') { $label = '未知' }
 
         $card = New-Object Windows.Controls.Border
-        $card.Background = New-Brush '#FFFFFFFF'
-        $card.BorderBrush = New-Brush $bdHex
+        $card.Background = New-Brush '#FFFFFFFF'; $card.BorderBrush = New-Brush $bdHex
         $card.BorderThickness = New-Object Windows.Thickness(1)
         $card.CornerRadius = New-Object Windows.CornerRadius(10)
         $card.Padding = New-Object Windows.Thickness(11, 8, 11, 8)
@@ -242,8 +247,7 @@ function Render-AuditCards($Items) {
         $dot = New-Object Windows.Shapes.Ellipse
         $dot.Width = 10; $dot.Height = 10; $dot.Fill = New-Brush $dotHex
         $lampWrap.Child = $dot
-        [Windows.Controls.Grid]::SetColumn($lampWrap, 0)
-        $null = $g.Children.Add($lampWrap)
+        [Windows.Controls.Grid]::SetColumn($lampWrap, 0); $null = $g.Children.Add($lampWrap)
 
         $sp = New-Object Windows.Controls.StackPanel
         $hdr = New-Object Windows.Controls.DockPanel
@@ -253,24 +257,20 @@ function Render-AuditCards($Items) {
         [Windows.Controls.DockPanel]::SetDock($badge, 'Right')
         $bTxt = New-Object Windows.Controls.TextBlock
         $bTxt.Text = $label; $bTxt.FontSize = 10.5; $bTxt.FontWeight = 'SemiBold'; $bTxt.Foreground = New-Brush $fgHex
-        $badge.Child = $bTxt
-        $null = $hdr.Children.Add($badge)
+        $badge.Child = $bTxt; $null = $hdr.Children.Add($badge)
 
         $title = New-Object Windows.Controls.TextBlock
         $title.Text = [string]$it.name; $title.FontSize = 12.5; $title.FontWeight = 'SemiBold'; $title.Foreground = New-Brush '#FF1F1E1D'
         $title.TextTrimming = 'CharacterEllipsis'
-        $null = $hdr.Children.Add($title)
-        $null = $sp.Children.Add($hdr)
+        $null = $hdr.Children.Add($title); $null = $sp.Children.Add($hdr)
 
         $det = New-Object Windows.Controls.TextBlock
         $det.Text = [string]$it.detail; $det.FontSize = 11; $det.Foreground = New-Brush '#FF6B665E'
         $det.TextWrapping = 'Wrap'; $det.Margin = New-Object Windows.Thickness(0, 3, 0, 0)
         $null = $sp.Children.Add($det)
 
-        [Windows.Controls.Grid]::SetColumn($sp, 1)
-        $null = $g.Children.Add($sp)
-        $card.Child = $g
-        $null = $lampGrid.Children.Add($card)
+        [Windows.Controls.Grid]::SetColumn($sp, 1); $null = $g.Children.Add($sp)
+        $card.Child = $g; $null = $lampGrid.Children.Add($card)
     }
 }
 
@@ -303,46 +303,53 @@ function Refresh-State {
         if ($line -match '^([^=]+)=(.*)$') { $map[$Matches[1]] = $Matches[2] }
     }
     $lock = $map['LOCK']
-    $mode = $map['LOCK_MODE']
-    $procLocked = $map['PROC_LOCKED']
-    $strict = $map['STRICT_MODE']
+    $wdOn = $map['PERSISTENT_LOCK']
     $nodes = $map['ENTRY_NODES']
     $cc = $map['COUNTRY_TARGET']
     $script:currentLock = $lock
 
     if ($nodes -and $nodes -ne '未配置' -and [string]::IsNullOrWhiteSpace($nodesInput.Text)) { $nodesInput.Text = $nodes }
-    $script:suppressStrictEvent = $true
-    $chkStrictMode.IsChecked = ($strict -eq '1')
-    $script:suppressStrictEvent = $false
+    $relaxWarnBanner.Visibility = if ($lock -eq 'relax') { [Windows.Visibility]::Visible } else { [Windows.Visibility]::Collapsed }
 
     if ($lock -eq 'on') {
-        $modeLabel = if ($mode -eq 'strict') { '全封闭模式' } else { '放行国内 · 海外/Claude死锁' }
-        $statusText.Text = '安全锁已开启'; $statusText.Foreground = New-Brush '#FF16A34A'
+        $statusText.Text = '一级安全锁已开启'; $statusText.Foreground = New-Brush '#FF16A34A'
         $statusDot.Fill = New-Brush '#FF16A34A'; $statusPill.Background = New-Brush '#FFDCFCE7'
-        $statusSub.Text = "Claude 已放行且仅走海外 TUN ($modeLabel) · 目标国: $cc"
-        $toggleTitle.Text = '🔓 关闭安全锁（切回日常上网 · 自动锁死 Claude）'
-        $toggleDesc.Text = '切回日常模式后，Claude 内核 IFEO 与 25 个遥测域名永久锁死，点开弹提示'
+        $statusSub.Text = "100% 公网流量强制只走 TUN · Claude 已放行 · 自愈守卫=$wdOn | 目标国: $cc"
+        $toggleTitle.Text = '🟡 关闭一级安全锁（弹窗确认并退出 Claude → 恢复国内网络）'
+        $toggleDesc.Text = '关闭后放行国内白名单网络，海外与 Claude 遥测持续阻断，Claude 全版本进程自动锁死'
         $btnToggleLock.Background = New-Brush '#FFD97706'; $btnToggleLock.BorderBrush = New-Brush '#FFB45309'
-    } elseif ($lock -eq 'standby') {
-        $statusText.Text = '日常模式 · Claude已锁死'; $statusText.Foreground = New-Brush '#FFD97706'
+        $btnRelaxLock.Content = '⚠ 二级放宽锁（防国内误伤）'
+        $btnRelaxLock.Background = New-Brush '#FFFEE2E2'; $btnRelaxLock.Foreground = New-Brush '#FFDC2626'
+    } elseif ($lock -eq 'cn') {
+        $statusText.Text = '国内白名单直连态'; $statusText.Foreground = New-Brush '#FFD97706'
         $statusDot.Fill = New-Brush '#FFD97706'; $statusPill.Background = New-Brush '#FFFEF3C7'
-        $statusSub.Text = "日常上网可用 | 内核 IFEO 锁=$procLocked + 25 个遥测黑洞 + 永久 ASN 防线 | 目标国: $cc"
-        $toggleTitle.Text = '🔒 开启安全锁（启用内核防泄露硬锁并解锁 Claude）'
-        $toggleDesc.Text = '开启后 Claude 只能走海外 TUN，代理退出/重启/死机 0ms 零泄露'
+        $statusSub.Text = "Claude 全版本进程已锁死 + 海外与 34 个遥测域名持续阻断 | 目标国: $cc"
+        $toggleTitle.Text = '🔒 开启一级安全锁（100% 流量强制只走 TUN · 解锁 Claude）'
+        $toggleDesc.Text = '配合全局 + TUN 使用，物理网卡一切国内外公网/裸DNS/IPv6/STUN 全部 0ms 拦截'
         $btnToggleLock.Background = New-Brush '#FFD97757'; $btnToggleLock.BorderBrush = New-Brush '#FFC26142'
+        $btnRelaxLock.Content = '⚠ 二级放宽锁（防国内误伤）'
+        $btnRelaxLock.Background = New-Brush '#FFFEE2E2'; $btnRelaxLock.Foreground = New-Brush '#FFDC2626'
+    } elseif ($lock -eq 'relax') {
+        $statusText.Text = '二级放宽锁已打开'; $statusText.Foreground = New-Brush '#FFDC2626'
+        $statusDot.Fill = New-Brush '#FFDC2626'; $statusPill.Background = New-Brush '#FFFEE2E2'
+        $statusSub.Text = "⚠️ 无全网防护！严禁打开任何 Claude 服务或点击 Claude 邮件链接（底层进程与遥测黑洞仍锁定）"
+        $toggleTitle.Text = '🔒 开启一级安全锁（100% 流量强制只走 TUN · 解锁 Claude）'
+        $toggleDesc.Text = '点击立刻关闭放宽态并恢复 100% 全走 TUN 最高防护'
+        $btnToggleLock.Background = New-Brush '#FFD97757'; $btnToggleLock.BorderBrush = New-Brush '#FFC26142'
+        $btnRelaxLock.Content = '关闭二级放宽锁（恢复拦截）'
+        $btnRelaxLock.Background = New-Brush '#FFDC2626'; $btnRelaxLock.Foreground = New-Brush '#FFFFFFFF'
     } else {
         $statusText.Text = '尚未初始化'; $statusText.Foreground = New-Brush '#FF6B665E'
         $statusDot.Fill = New-Brush '#FF9CA3AF'; $statusPill.Background = New-Brush '#FFF1F2F4'
         $statusSub.Text = '请先打开代理客户端「全局 + TUN」，再点击右侧「一键初始化」'
-        $toggleTitle.Text = '🔒 开启安全锁（启用内核防泄露硬锁并解锁 Claude）'
-        $toggleDesc.Text = '开启后 Claude 只能走海外 TUN，代理退出/重启/死机 0ms 零泄露'
+        $toggleTitle.Text = '🔒 开启一级安全锁（100% 流量强制只走 TUN · 解锁 Claude）'
+        $toggleDesc.Text = '配合全局 + TUN 使用，物理网卡一切国内外公网/裸DNS/IPv6/STUN 全部 0ms 拦截'
         $btnToggleLock.Background = New-Brush '#FFD97757'; $btnToggleLock.BorderBrush = New-Brush '#FFC26142'
     }
 }
 
 function Run-UiOp([string]$Title, [string[]]$GuardArgs, [bool]$OpenLog = $false) {
     foreach ($b in $allBtns) { $b.IsEnabled = $false }
-    $chkStrictMode.IsEnabled = $false
     Show-Toast "正在执行: $Title ..." $false
     $win.Dispatcher.Invoke([action]{}, [Windows.Threading.DispatcherPriority]::Background)
     try {
@@ -358,21 +365,20 @@ function Run-UiOp([string]$Title, [string[]]$GuardArgs, [bool]$OpenLog = $false)
     } finally {
         Refresh-State
         foreach ($b in $allBtns) { $b.IsEnabled = $true }
-        $chkStrictMode.IsEnabled = $true
     }
 }
 
 function Run-FullAudit {
     foreach ($b in $allBtns) { $b.IsEnabled = $false }
     Set-ActiveTab 'dash'
-    Show-Toast '正在并发执行 14 维度深度体检（IP 画像 / DNS 泄露 / WebRTC / TLS / 延迟）...' $false
+    Show-Toast '正在并发执行 14 维度深度体检（IP 画像 / isp.ac DNS 泄露 / WebRTC / TLS / 延迟）...' $false
     $win.Dispatcher.Invoke([action]{}, [Windows.Threading.DispatcherPriority]::Background)
     try {
         $raw = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $AUDIT -ConfigPath $CFG -Json 2>&1 | Out-String).Trim()
         $data = $raw | ConvertFrom-Json
         Render-AuditCards $data.items
         $summaryBadge.Visibility = [Windows.Visibility]::Visible
-        $summaryText.Text = "● $($data.summary.ok) 通过  ● $($data.summary.warn) 警告  ● $($data.summary.fail) 异常  |  覆盖率 $($data.coverage_percent)%"
+        $summaryText.Text = "● $($data.summary.ok) 通过  ● $($data.summary.warn) 警告  ● $($data.summary.fail) 异常  |  覆盖 $($data.coverage_percent)%"
         if ([int]$data.summary.fail -eq 0) {
             Show-Toast "体检完成：$($data.summary.ok) 项绿灯通过，0 项高危异常（覆盖率 $($data.coverage_percent)%）" $false
         } else {
@@ -393,43 +399,42 @@ $btnTabLog.Add_Click({ Set-ActiveTab 'log' })
 
 $btnToggleLock.Add_Click({
     if ($script:currentLock -eq 'on') {
-        Run-UiOp '关闭安全锁 (切回日常模式并从内核锁死 Claude 进程)' @('unlock') $false
+        $msg = "确定要关闭一级安全锁并切换回国内网络吗？`n`n关闭时系统将自动执行：`n1. 立即退出正在运行的 Claude 桌面版、所有 Helper 与 Claude Code CLI；`n2. 切换为国内白名单直连网络，但一切海外与 Claude 遥测服务器仍持续阻断；`n3. Claude 全版本进程将被系统锁死，再次使用前请先开启一级安全锁。"
+        $ans = [System.Windows.MessageBox]::Show($msg, '确认关闭一级安全锁并退出 Claude', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)
+        if ($ans -eq [System.Windows.MessageBoxResult]::Yes) {
+            Run-UiOp '退出 Claude 并切换为国内白名单网络' @('unlock') $false
+        }
     } else {
         $n = $nodesInput.Text.Trim()
         if ($n) { $null = Invoke-GuardAction @('set-nodes', $n) }
-        Run-UiOp '开启安全锁 (刷入持久化防火墙并解锁 Claude)' @('lock') $false
+        Run-UiOp '开启一级安全锁 (100% 流量强制只走 TUN)' @('lock') $false
     }
 })
 
-$chkStrictMode.Add_Click({
-    if ($script:suppressStrictEvent) { return }
-    $val = if ($chkStrictMode.IsChecked) { '1' } else { '0' }
-    if ($val -eq '1' -and [string]::IsNullOrWhiteSpace($nodesInput.Text)) {
-        Show-Toast '启用全封闭模式前，请先填入第一跳代理入口 IP 或域名！' $true
-        $script:suppressStrictEvent = $true; $chkStrictMode.IsChecked = $false; $script:suppressStrictEvent = $false
-        return
-    }
-    $n = $nodesInput.Text.Trim()
-    if ($n) { $null = Invoke-GuardAction @('set-nodes', $n) }
-    $null = Invoke-GuardAction @('set-strict', $val)
-    if ($script:currentLock -eq 'on') {
-        Run-UiOp '应用新开锁策略' @('lock') $false
+$btnRelaxLock.Add_Click({
+    if ($script:currentLock -eq 'relax') {
+        Run-UiOp '关闭二级放宽锁 (恢复国内白名单与海外封锁)' @('unlock') $false
     } else {
-        Show-Toast $(if ($val -eq '1') { '已设为全封闭模式（下次开启安全锁生效）' } else { '已设为放行国内直连模式（推荐）' }) $false
+        $msg = "⚠️ 警告：打开二级放宽锁后，此时电脑没有防护！`n`n为防止误伤国内规则未收录的流量，普通公网防火墙规则将被放宽。`n`n🚨 请务必遵守：在此期间请不要打开任何与 Claude 相关的服务，包括在电子邮件里不要点击 Claude 发来的电子邮件和 Claude 发来的任何链接！`n`n（注：底层 Claude 全版本进程锁与遥测黑洞仍将保持锁定，直到彻底卸载本软件。）"
+        $ans = [System.Windows.MessageBox]::Show($msg, '⚠️ 高危警告：打开二级放宽锁', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)
+        if ($ans -eq [System.Windows.MessageBoxResult]::Yes) {
+            Run-UiOp '打开二级放宽锁 (保持底层 Claude 进程与遥测黑洞锁定)' @('relax') $false
+        }
     }
 })
 
 $btnSave.Add_Click({
     $n = $nodesInput.Text.Trim()
-    Run-UiOp '保存代理入口白名单' @('set-nodes', $n) $false
+    Run-UiOp '保存第一跳代理入口白名单' @('set-nodes', $n) $false
     if ($script:currentLock -eq 'on') { Run-UiOp '同步白名单到防火墙' @('lock') $false }
 })
 
+$btnEmergency.Add_Click({ Run-UiOp '生成桌面《断网急救.txt》' @('write-emergency') $false })
 $btnInit.Add_Click({
     Run-UiOp '一键初始化环境' @('init', $nodesInput.Text.Trim()) $false
     Run-FullAudit
 })
-$btnVerifyFw.Add_Click({ Run-UiOp '验收系统防火墙、IFEO 进程锁与 DROP 流量日志' @('verify-firewall') $true })
+$btnVerifyFw.Add_Click({ Run-UiOp '验收系统防火墙、全版本进程守卫与 DROP 日志' @('verify-firewall') $true })
 $btnCheck.Add_Click({ Run-FullAudit })
 $btnExport.Add_Click({ Run-UiOp '导出脱敏交机体检报告到桌面' @('export-report') $false })
 

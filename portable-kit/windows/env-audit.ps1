@@ -188,19 +188,21 @@ $fwRules = @(Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue 
 $fwProfs = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue)
 $fwAllOn = ($fwProfs.Count -gt 0 -and (@($fwProfs | Where-Object { -not $_.Enabled }).Count -eq 0))
 $fwLogOn = ($fwProfs.Count -gt 0 -and (@($fwProfs | Where-Object { -not $_.LogBlocked }).Count -eq 0))
-$isActive = (@($fwRules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Overseas-*' -or $_.Name -like 'ClaudeGuard-Block-Strict-*' }).Count -gt 0)
-$isStandby = (-not $isActive -and @($fwRules | Where-Object { $_.Name -like 'ClaudeGuard-Standby-Claude-*' }).Count -gt 0)
-$lockOn = ($isActive -and $fwAllOn)
-$modeLabel = if ($cfg.lockMode -eq 'strict') { '全封闭模式' } else { '放行国内 · 死锁Claude与海外' }
-if ($isActive -and $fwAllOn) {
+$isStrict = (@($fwRules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Strict-*' }).Count -gt 0)
+$isCn = (-not $isStrict -and @($fwRules | Where-Object { $_.Name -like 'ClaudeGuard-Block-Overseas-*' }).Count -gt 0)
+$isStandby = (-not $isStrict -and -not $isCn -and @($fwRules | Where-Object { $_.Name -like 'ClaudeGuard-Standby-Claude-*' }).Count -gt 0)
+$lockOn = ($isStrict -and $fwAllOn)
+if ($isStrict -and $fwAllOn) {
     $logStr = if ($fwLogOn) { '拦截日志已开' } else { '拦截日志未全开' }
-    Add-AuditItem 'killswitch' '持久化安全锁 (WFP 防火墙)' 'ok' "安全锁已开启 · $modeLabel ($($fwRules.Count)条规则, $logStr, 入口=$($cfg.entryNodes))"
+    Add-AuditItem 'killswitch' '持久化安全锁 (WFP 防火墙)' 'ok' "一级锁已开启 · 100%流量只走TUN ($($fwRules.Count)条规则, $logStr, 入口=$($cfg.entryNodes))"
+} elseif ($isCn -and $fwAllOn) {
+    Add-AuditItem 'killswitch' '持久化安全锁 (WFP 防火墙)' 'warn' '一级锁已关闭 · 国内白名单直连态 (海外与Claude遥测已死锁，用Claude前请先开一级锁)'
 } elseif ($isStandby -and $fwAllOn) {
-    Add-AuditItem 'killswitch' '持久化安全锁 (WFP 防火墙)' 'warn' "当前为日常上网模式 (Claude 已被 IFEO 内核锁死且永久阻断遥测，使用 Claude 前请先点「开启安全锁」)"
+    Add-AuditItem 'killswitch' '持久化安全锁 (WFP 防火墙)' 'warn' '二级放宽锁已打开 (严禁触碰任何Claude服务与邮件链接！底层进程与遥测黑洞仍在保护中)'
 } elseif ($fwRules.Count -ge 2) {
     Add-AuditItem 'killswitch' '持久化安全锁 (WFP 防火墙)' 'fail' "已写入 $($fwRules.Count) 条规则，但 Windows 防火墙配置档被第三方安全软件或系统策略关闭！"
 } else {
-    Add-AuditItem 'killswitch' '持久化安全锁 (WFP 防火墙)' 'fail' '尚未初始化安全锁，请先点「一键初始化环境」或「开启安全锁」'
+    Add-AuditItem 'killswitch' '持久化安全锁 (WFP 防火墙)' 'fail' '尚未初始化安全锁，请先开启代理「全局+TUN」并点击「一键初始化」'
 }
 
 # 2. TUN 虚拟网卡与默认路由归属
