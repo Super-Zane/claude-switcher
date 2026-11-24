@@ -6,7 +6,7 @@
 
 **Fail-Closed 账号环境管理器 —— 把真实 IP 泄漏拦截在启动之前**
 
-> 🛠️ **本项目持续活跃更新中**——防护项随目标平台风控演进不断增加，见下方[路线图](#路线图)。
+> 🛠️ **本分叉增强版（`Super-Zane/claude-switcher`，基于上游 `YOURSJEYO/claude-switcher` `v1.10.0`，遵循 AGPL-3.0-only）**：在保留双端原生零依赖架构的前提下，针对 macOS 与 Windows 统一新增 **V2RayU / v2rayN 全栈支持**、**内核级防直连防火墙兜底（macOS `pf` 锚点 + Windows Defender Firewall）**、**事件驱动保镖（覆盖 TUN 忘开 / VPS 掉线回落直连 / 手机热点切网与 IPv6 / 断网与重连毫秒窗口）** 并修复 Windows Issue `#54`。完整说明见 [V2RayU / v2rayN 与双端防火墙防泄露指南](docs/V2RAY-FIREWALL-GUIDE.md)。
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/YOURSJEYO/claude-switcher?label=release&color=blue)](https://github.com/YOURSJEYO/claude-switcher/releases/latest)

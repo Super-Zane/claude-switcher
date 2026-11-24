@@ -13,7 +13,10 @@
 
 本项目把"防到什么程度"写在明处，不夸大：
 
-- **Kill-Switch 是进程级急停，不是防火墙级 fail-closed**。保镖以 10 秒周期巡检"内核进程 × TUN 网卡"双因子，从隧道断开到进程被杀存在已知时间窗口（TOCTOU）；窗口内恰好发出的数据包不在防护范围内。急停范围覆盖桌面版 Claude 与安装用户的 Claude Code CLI 进程（native `claude`/`claude.exe` 及 npm/bun 的 `@anthropic-ai/claude-code`），仅按安装用户与进程签名匹配，不按名字扫全系统；进程级边界与 TOCTOU 窗口不因扩展覆盖范围而改变。未来版本评估引入 pf 防火墙锚点做网络级 fail-closed
+- **纵深防泄露（内核防火墙 + 事件驱动急停）**：
+  - **第一道防线（内核级 0ms 防直连）**：macOS 提供 `core/pf-firewall.sh` 独立 `pf` 锚点（`com.claude-switcher`），Windows 提供 `windows/claude-firewall.ps1` 防火墙分组（`ClaudeSwitcher-KillSwitch`），在内核层阻断所有非隧道物理网卡（含 Wi-Fi / 有线 / 手机热点新接口与 IPv6 / 断网重连窗口）直连 Anthropic 官方段与动态解析精准 IP、以及非隧道 STUN UDP 端口（`3478/5349/19302`），Windows 侧额外锁定 `Claude.exe`/`claude.exe` 进程物理公网出站；同时自动白名单排除本机代理配置中的 VPS 节点 IP，避免误伤 CDN 中转节点。
+  - **第二道防线（事件驱动进程急停）**：macOS 守护进程升级为 `KeepAlive` + `route -n monitor` 事件驱动（2 秒兜底 + 新热点接口自动关 IPv6 + 可选隧道内 VPS 探活），Windows 保镖升级为 `.NET NetworkChange` 事件驱动（2 秒兜底 + 默认路由优先级校验 + 解除计划任务 72 小时/电池限制 + 同步覆盖 Claude Code CLI）。
+  - **诚实边界**：若用户未启用系统防火墙兜底，则回退为纯事件驱动进程急停（仍存在极短 TOCTOU 窗口）；V2RayU 纯本地代理（无 TUN）模式下依赖 `pf` 与代理注入，最高安全强度仍推荐 TUN + 内核防火墙双重开启，详见 [docs/V2RAY-FIREWALL-GUIDE.md](docs/V2RAY-FIREWALL-GUIDE.md)。
 - **CLI 账号联动的保证边界以 `claude-switch.sh cli` 为界**。切换器按官方 `CLAUDE_CONFIG_DIR` 机制把 CLI 隔离到当前桌面账号的目录（A 用既有 `~/.claude`，B–D 用 `~/.claude-switcher/cli-accounts/<槽位>`，0700），并拒绝认证环境变量覆盖与冲突的 `CLAUDE_CONFIG_DIR`；但直接运行原始 `claude` 完全绕过这些防线，无法保证与桌面账号一致。macOS 钥匙串条目由 CLI 按配置目录自行隔离，本项目不读取、导出或改写钥匙串内容，也不把 CLI 配置目录纳入加密桌面快照
 - **自动更新的信任根是 GitHub 仓库本身**。每次更新前会对照仓库根的 `SHA256SUMS` 逐项校验 zip 工件（core 脚本 + daemons 模板 + installer），可防传输层篡改/中间人换包；但如果仓库账号本身被攻陷，校验清单和工件会同时被替换——这是目前的信任边界。维护侧的发布纪律：`core/`、`daemons/`、`installer/` 任何改动提交前必须运行 `scripts/gen-sums.sh` 重新生成 SHA256SUMS，二者永远同提交
 - **守护进程脚本 root 所有、用户态不可写**。保镖与时区看门狗安装在 `/Library/Application Support/claude-switcher/`（root:wheel, 755），launchd 以 root 执行这些脚本，普通用户进程无法篡改其内容——本地权限提升面已收敛

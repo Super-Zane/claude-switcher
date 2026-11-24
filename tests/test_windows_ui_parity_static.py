@@ -143,7 +143,7 @@ class WindowsUiParityStaticTests(unittest.TestCase):
         }
         self.assertEqual(
             modes,
-            {"clash-verge", "flclash", "sing-box", "clashx", "surge", "wireguard", "other", "auto"},
+            {"clash-verge", "flclash", "v2rayn", "sing-box", "clashx", "surge", "wireguard", "other", "auto"},
         )
 
     def test_navigation_is_structural_and_keeps_tools_and_settings(self):

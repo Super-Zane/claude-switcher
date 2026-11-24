@@ -149,7 +149,7 @@ class WindowsUpdateStaticTests(unittest.TestCase):
     def test_check_update_contract(self):
         text = read(CORE)
         self.assertIn(
-            "https://api.github.com/repos/YOURSJEYO/claude-switcher/releases/latest",
+            "https://api.github.com/repos/Super-Zane/claude-switcher/releases/latest",
             text,
         )
         self.assertIn("-UserAgent 'ClaudeSwitcher'", text)

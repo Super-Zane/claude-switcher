@@ -9,9 +9,11 @@
 - 代理客户端（需支持 TUN 模式），安装器会自动探测并写入 `$PROXY_MODE`:
   - **Clash Verge** —— 存在配置目录即识别，可由「一键修复」按当前模式配置置顶规则
   - **FlClash** —— 识别 `FlClashCore` / `FlClash` 进程
+  - **v2rayN** —— 识别 `v2rayN` / `xray` / `v2ray` / `sing-box` / `mihomo` 与 `172.19.x` / `172.18.x` / Wintun 网卡，支持 `v2ray-rules check|export` 路由审计与规则导出
   - **sing-box / ClashX / Surge / WireGuard** —— 按进程或服务识别
   - **其他 TUN 客户端**（Astrill / OpenVPN / Tailscale 等）—— 安装时选 `other`
   - **auto** —— 任一已知进程/服务命中即视为在线（未识别到客户端时的默认选项）
+- **内核级防直连兜底**：安装器与「一键修复」支持自动启用 Windows 防火墙规则组 `ClaudeSwitcher-KillSwitch`（[claude-firewall.ps1](claude-firewall.ps1)），配合 `NetworkChange` 事件驱动保镖与已解除 72 小时/电池限制的计划任务，详见 [../docs/V2RAY-FIREWALL-GUIDE.md](../docs/V2RAY-FIREWALL-GUIDE.md)。
 - Claude 桌面版 Windows（传统 EXE 或 MSIX/Appx；MSIX 数据目录可自动发现，但仍待 Windows 真机验收）
 - 安装时需要**管理员权限**一次（注册守护任务 / 锁定时区 / 关闭 IPv6）
 

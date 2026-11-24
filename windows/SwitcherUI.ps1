@@ -244,7 +244,7 @@ $xaml = @"
                             </Border>
                             <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
                                 <TextBlock Text="环境安全状态" FontSize="16" FontWeight="SemiBold"/>
-                                <TextBlock Text="18 项检查 · 硬性项必须通过" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                <TextBlock Text="19 项检查 · 硬性项必须通过" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0"/>
                             </StackPanel>
                             <Border x:Name="StatusPill" Grid.Column="2" VerticalAlignment="Center" Padding="10,5" CornerRadius="12" Background="#33F59E0B">
                                 <TextBlock x:Name="StatusText" Text="等待检查" FontSize="11" FontWeight="Bold" Foreground="#FFFBBE24"/>
@@ -256,9 +256,10 @@ $xaml = @"
                             <TextBlock Text="代理客户端" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource MutedBrush}"/>
                             <ComboBox x:Name="ProxyClient" MinHeight="36" Margin="0,9,0,0" IsEnabled="False" ToolTip="选择实际使用的代理客户端">
                                 <ComboBoxItem Content="Clash Verge" Tag="clash-verge"/><ComboBoxItem Content="FlClash" Tag="flclash"/>
-                                <ComboBoxItem Content="sing-box" Tag="sing-box"/><ComboBoxItem Content="ClashX" Tag="clashx"/>
-                                <ComboBoxItem Content="Surge" Tag="surge"/><ComboBoxItem Content="WireGuard" Tag="wireguard"/>
-                                <ComboBoxItem Content="其他 TUN 客户端" Tag="other"/><ComboBoxItem Content="自动识别" Tag="auto"/>
+                                <ComboBoxItem Content="v2rayN" Tag="v2rayn"/><ComboBoxItem Content="sing-box" Tag="sing-box"/>
+                                <ComboBoxItem Content="ClashX" Tag="clashx"/><ComboBoxItem Content="Surge" Tag="surge"/>
+                                <ComboBoxItem Content="WireGuard" Tag="wireguard"/><ComboBoxItem Content="其他 TUN 客户端" Tag="other"/>
+                                <ComboBoxItem Content="自动识别" Tag="auto"/>
                             </ComboBox>
                             <TextBlock Text="FlClash 控制端口" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource MutedBrush}" Margin="0,12,0,0"/>
                             <TextBox x:Name="FlClashPort" MinHeight="34" Margin="0,6,0,0" ToolTip="留空表示自动发现。可填 9090 或 127.0.0.1:9090，只接受本机地址"/>
@@ -316,7 +317,7 @@ $xaml = @"
                         <StackPanel>
                             <Grid Margin="0,0,0,8">
                                 <TextBlock Text="环境检查" FontSize="15" FontWeight="SemiBold"/>
-                                <TextBlock Text="全部 18 项" FontSize="10" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                <TextBlock Text="全部 19 项" FontSize="10" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                             </Grid>
                             <ListBox x:Name="CheckList" Background="Transparent" BorderThickness="0" Foreground="#FFE6EDF7" FontSize="11">
                                 <ListBox.ItemTemplate>
@@ -378,8 +379,8 @@ $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $win = [Windows.Markup.XamlReader]::Load($reader)
 $rows = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
 $win.FindName('CheckList').ItemsSource = $rows
-$checkNames = @('代理内核','TUN网卡','出口IP','IP一致','时区','地区','IPv6','DNS','WebRTC','保镖','规则置顶','客户端语言','ASN属性','生态可达性','IP纯净度','IP代理标记','IP机房属性','IP黑名单')
-$clientModes = @('clash-verge','flclash','sing-box','clashx','surge','wireguard','other','auto')
+$checkNames = @('代理内核','TUN网卡','出口IP','IP一致','时区','地区','IPv6','DNS','WebRTC','保镖','防火墙兜底','规则置顶','客户端语言','ASN属性','生态可达性','IP纯净度','IP代理标记','IP机房属性','IP黑名单')
+$clientModes = @('clash-verge','flclash','v2rayn','sing-box','clashx','surge','wireguard','other','auto')
 $script:isBusy = $false
 $script:environmentReady = $false
 $script:currentClient = ''

@@ -4,6 +4,11 @@ echo "=============================="
 echo "  Claude 账号切换器 - 卸载"
 echo "=============================="
 echo ""
+if [ -x "/Library/Application Support/claude-switcher/pf-firewall.sh" ]; then
+    sudo /bin/bash "/Library/Application Support/claude-switcher/pf-firewall.sh" disable 2>/dev/null || true
+elif [ -x "$HOME/.local/bin/pf-firewall.sh" ]; then
+    sudo /bin/bash "$HOME/.local/bin/pf-firewall.sh" disable 2>/dev/null || true
+fi
 sudo launchctl bootout system/local.claude-bodyguard 2>/dev/null
 sudo launchctl bootout system/local.tz-watchdog 2>/dev/null
 sudo launchctl bootout system/local.claude-update 2>/dev/null
@@ -14,7 +19,7 @@ rm -f "$HOME/Library/LaunchAgents/local.claude-update.plist"
 sudo rm -rf "/Applications/Claude切换器.app"
 # 兼容旧版桌面安装路径。
 rm -rf "$HOME/Desktop/Claude切换器.app"
-rm -f "$HOME/.local/bin/claude-switch.sh" "$HOME/.local/bin/claude-bodyguard.sh" "$HOME/.local/bin/tz-watchdog.sh" "$HOME/.local/bin/local.claude-bodyguard.plist" "$HOME/.local/bin/local.tz-watchdog.plist" "$HOME/.local/bin/local.claude-update.plist" "$HOME/.local/bin/claude-switch.sh.bak" "$HOME/.local/bin/claude-bodyguard.sh.bak" "$HOME/.local/bin/tz-watchdog.sh.bak"
+rm -f "$HOME/.local/bin/claude-switch.sh" "$HOME/.local/bin/pf-firewall.sh" "$HOME/.local/bin/claude-bodyguard.sh" "$HOME/.local/bin/tz-watchdog.sh" "$HOME/.local/bin/local.claude-bodyguard.plist" "$HOME/.local/bin/local.tz-watchdog.plist" "$HOME/.local/bin/local.claude-update.plist" "$HOME/.local/bin/claude-switch.sh.bak" "$HOME/.local/bin/claude-bodyguard.sh.bak" "$HOME/.local/bin/tz-watchdog.sh.bak"
 echo ""
 echo "✅ 已卸载。"
 echo "注意: 账号存档保留在 ~/.claude-switcher/(含你的登录态),要删干净可手动: rm -rf ~/.claude-switcher"

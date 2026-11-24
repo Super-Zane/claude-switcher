@@ -143,29 +143,38 @@ locale_for() {
 # ---- 0. 前置检查 ----
 CLASH_DIR="$H/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
 FLCLASH_DIR="$H/Library/Application Support/com.follow.clash"
+V2RAYU_DIR="$H/.V2RayU"
+V2RAYN_DIR="$H/Library/Application Support/v2rayN"
 if [ -d "$CLASH_DIR" ]; then
     MODE="clash-verge"
 elif [ -d "$FLCLASH_DIR" ]; then
     MODE="flclash"
 elif [ -d "/Applications/Bettbox.app" ]; then
     MODE="bettbox"
+elif [ -d "/Applications/V2RayU.app" ] || [ -d "$V2RAYU_DIR" ]; then
+    MODE="v2rayu"
+elif [ -d "/Applications/v2rayN.app" ] || [ -d "$V2RAYN_DIR" ]; then
+    MODE="v2rayn"
 elif scutil --nc list 2>/dev/null | grep -q 'com.liguangming.Shadowrocket'; then
     MODE="shadowrocket"
 else
     echo "未自动识别到代理客户端,请手动选择:"
     echo "  1) clash-verge    2) flclash         3) shadowrocket"
     echo "  4) sing-box       5) clashx          6) surge"
-    echo "  7) bettbox        8) auto(任一命中即活)"
+    echo "  7) bettbox        8) v2rayu          9) v2rayn"
+    echo " 10) auto(任一命中即活)"
     read -r -p "请输入序号或名称: " pick
     case "$pick" in
-        1|clash-verge)  MODE="clash-verge" ;;
-        2|flclash)      MODE="flclash" ;;
+        1|clash-verge)   MODE="clash-verge" ;;
+        2|flclash)       MODE="flclash" ;;
         3|shadowrocket)  MODE="shadowrocket" ;;
         4|sing-box)      MODE="sing-box" ;;
         5|clashx)        MODE="clashx" ;;
         6|surge)         MODE="surge" ;;
         7|bettbox)       MODE="bettbox" ;;
-        8|auto)          MODE="auto" ;;
+        8|v2rayu|V2RayU) MODE="v2rayu" ;;
+        9|v2rayn|v2rayN) MODE="v2rayn" ;;
+        10|auto)         MODE="auto" ;;
         *) echo "未识别的选择,退出"; exit 1 ;;
     esac
 fi
@@ -273,8 +282,9 @@ echo "✓ 地区格式: $LOCALE"
 # ---- 3. 安装文件 ----
 mkdir -p "$H/.local/bin" "$H/.claude-switcher" "$H/Library/Logs"
 cp "$REPO/core/claude-switch.sh" "$H/.local/bin/"
+cp "$REPO/core/pf-firewall.sh" "$H/.local/bin/"
 cp "$REPO/core/stun-probe.py" "$H/.claude-switcher/"
-chmod +x "$H/.local/bin/claude-switch.sh"
+chmod +x "$H/.local/bin/claude-switch.sh" "$H/.local/bin/pf-firewall.sh"
 # 写入探测到的客户端/代理组名/地区目标
 sed -i '' \
     -e "s|^PROXY_MODE=\".*\"|PROXY_MODE=\"$MODE\"|" \
@@ -284,13 +294,14 @@ sed -i '' \
     -e "s|^LOCALE_TARGET=\".*\"|LOCALE_TARGET=\"$LOCALE\"|" \
     "$H/.local/bin/claude-switch.sh"
 
-# 保镖/时区看门狗脚本:物化到临时目录,由 sudo 段装入 root 所有的系统目录(用户态不可写,防提权)
+# 保镖/时区看门狗/pf防火墙脚本:物化到临时目录,由 sudo 段装入 root 所有的系统目录(用户态不可写,防提权)
 STAGE=$(mktemp -d)
-sed -e "s|__HOME__|$H|g" -e "s|__PROXY_MODE__|$MODE|g" \
+sed -e "s|__HOME__|$H|g" -e "s|__PROXY_MODE__|$MODE|g" -e "s|__COUNTRY_TARGET__|$CTRY|g" \
     "$REPO/daemons/claude-bodyguard.sh" > "$STAGE/claude-bodyguard.sh"
 sed -e "s|__HOME__|$H|g" -e "s|__TZ_TARGET__|$TZV|g" \
     "$REPO/daemons/tz-watchdog.sh" > "$STAGE/tz-watchdog.sh"
-chmod +x "$STAGE/claude-bodyguard.sh" "$STAGE/tz-watchdog.sh"
+cp "$REPO/core/pf-firewall.sh" "$STAGE/pf-firewall.sh"
+chmod +x "$STAGE/claude-bodyguard.sh" "$STAGE/tz-watchdog.sh" "$STAGE/pf-firewall.sh"
 # 清理旧版本装在用户目录下的守护脚本(用户可写=提权面)
 rm -f "$H/.local/bin/claude-bodyguard.sh" "$H/.local/bin/tz-watchdog.sh" \
       "$H/.local/bin/claude-bodyguard.sh.bak" "$H/.local/bin/tz-watchdog.sh.bak"
@@ -384,24 +395,31 @@ if [ -n "$DRYRUN" ]; then
 else
     # 守护脚本装入 root 所有的系统目录;同时清理旧版的 root 级自动更新(已改为用户态 LaunchAgent)
     SYSCMDS="mkdir -p '/Library/Application Support/claude-switcher';
-        cp '$STAGE/claude-bodyguard.sh' '$STAGE/tz-watchdog.sh' '/Library/Application Support/claude-switcher/' || exit 1;
-        chown root:wheel '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh' || exit 1;
-        chmod 755 '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh' || exit 1;
-        /usr/bin/xattr -d com.apple.quarantine '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh' 2>/dev/null || true;
+        cp '$STAGE/claude-bodyguard.sh' '$STAGE/tz-watchdog.sh' '$STAGE/pf-firewall.sh' '/Library/Application Support/claude-switcher/' || exit 1;
+        chown root:wheel '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh' '/Library/Application Support/claude-switcher/pf-firewall.sh' || exit 1;
+        chmod 755 '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh' '/Library/Application Support/claude-switcher/pf-firewall.sh' || exit 1;
+        /usr/bin/xattr -d com.apple.quarantine '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh' '/Library/Application Support/claude-switcher/pf-firewall.sh' 2>/dev/null || true;
         cp -X '$H/.local/bin/local.claude-bodyguard.plist' '$H/.local/bin/local.tz-watchdog.plist' /Library/LaunchDaemons/ || exit 1;
         /usr/bin/xattr -d com.apple.quarantine /Library/LaunchDaemons/local.claude-bodyguard.plist /Library/LaunchDaemons/local.tz-watchdog.plist 2>/dev/null || true;
         chown root:wheel /Library/LaunchDaemons/local.claude-bodyguard.plist /Library/LaunchDaemons/local.tz-watchdog.plist || exit 1;
         chmod 644 /Library/LaunchDaemons/local.claude-bodyguard.plist /Library/LaunchDaemons/local.tz-watchdog.plist || exit 1;
         launchctl bootout system/local.claude-bodyguard 2>/dev/null || true; launchctl bootstrap system /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || exit 1;
         launchctl bootout system/local.tz-watchdog 2>/dev/null || true; launchctl bootstrap system /Library/LaunchDaemons/local.tz-watchdog.plist || exit 1; launchctl print system/local.tz-watchdog >/dev/null 2>&1 || exit 1;
-        launchctl bootout system/local.claude-update 2>/dev/null; rm -f /Library/LaunchDaemons/local.claude-update.plist;"
+        launchctl bootout system/local.claude-update 2>/dev/null; rm -f /Library/LaunchDaemons/local.claude-update.plist;
+        /bin/bash '/Library/Application Support/claude-switcher/pf-firewall.sh' enable --resolve || true;"
     curt=$(readlink /etc/localtime 2>/dev/null)
     [ "$curt" != "/var/db/timezone/zoneinfo/$TZV" ] && SYSCMDS="$SYSCMDS /usr/sbin/systemsetup -settimezone '$TZV';"
-    v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
-    echo "$v6" | grep -qi 'off' || SYSCMDS="$SYSCMDS networksetup -setv6off Wi-Fi;"
+    # 批量关闭所有启用物理网络服务的 IPv6 (含 Wi-Fi / USB 热点 / 以太网)
+    while IFS= read -r svc; do
+        [ -n "$svc" ] || continue
+        v6=$(networksetup -getinfo "$svc" 2>/dev/null | grep -i '^IPv6:')
+        if [ -n "$v6" ] && ! printf '%s\n' "$v6" | grep -qi 'off'; then
+            SYSCMDS="$SYSCMDS networksetup -setv6off '$svc';"
+        fi
+    done < <(networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*')
     SYSCMDS="$SYSCMDS dscacheutil -flushcache; killall -HUP mDNSResponder"
     echo ""
-    echo "接下来需要输入一次开机密码,用于: 安装守护进程(系统目录) + 锁定时区($TZV) + 关闭IPv6"
+    echo "接下来需要输入一次开机密码,用于: 安装守护进程(系统目录) + 启用 pf 防直连锚点 + 锁定时区($TZV) + 关闭全接口IPv6"
     sudo bash -c "$SYSCMDS" && echo "✓ 系统级配置完成" || echo "✗ 系统级配置被取消,可稍后重新运行安装程序"
     rm -rf "$STAGE"
 

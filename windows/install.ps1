@@ -29,6 +29,8 @@ if ($CLASH_DIR) {
     $PROXY_MODE = 'clash-verge'
 } elseif (Get-Process -Name 'FlClashCore','FlClash' -ErrorAction SilentlyContinue) {
     $PROXY_MODE = 'flclash'
+} elseif ((Get-Process -Name 'v2rayN' -ErrorAction SilentlyContinue) -or (Test-Path "$env:APPDATA\v2rayN") -or (Test-Path "$env:LOCALAPPDATA\v2rayN")) {
+    $PROXY_MODE = 'v2rayn'
 } elseif (Get-Process -Name 'sing-box' -ErrorAction SilentlyContinue) {
     $PROXY_MODE = 'sing-box'
 } elseif (Get-Process -Name 'ClashX' -ErrorAction SilentlyContinue) {
@@ -40,20 +42,24 @@ if ($CLASH_DIR) {
 }
 if (-not $PROXY_MODE) {
     Write-Host "未自动识别到代理客户端,请选择:" -ForegroundColor Yellow
-    Write-Host "  1) clash-verge  2) flclash     3) sing-box  4) clashx"
-    Write-Host "  5) surge        6) wireguard   7) other     8) auto"
+    Write-Host "  1) clash-verge  2) flclash     3) v2rayn    4) sing-box"
+    Write-Host "  5) clashx       6) surge       7) wireguard 8) other"
+    Write-Host "  9) auto"
     $pick = Read-Host "请输入序号或名称(直接回车=auto)"
     switch ($pick) {
         '1' { $PROXY_MODE = 'clash-verge' }
         '2' { $PROXY_MODE = 'flclash' }
-        '3' { $PROXY_MODE = 'sing-box' }
-        '4' { $PROXY_MODE = 'clashx' }
-        '5' { $PROXY_MODE = 'surge' }
-        '6' { $PROXY_MODE = 'wireguard' }
-        '7' { $PROXY_MODE = 'other' }
-        '8' { $PROXY_MODE = 'auto' }
+        '3' { $PROXY_MODE = 'v2rayn' }
+        '4' { $PROXY_MODE = 'sing-box' }
+        '5' { $PROXY_MODE = 'clashx' }
+        '6' { $PROXY_MODE = 'surge' }
+        '7' { $PROXY_MODE = 'wireguard' }
+        '8' { $PROXY_MODE = 'other' }
+        '9' { $PROXY_MODE = 'auto' }
         'clash-verge' { $PROXY_MODE = 'clash-verge' }
         'flclash'     { $PROXY_MODE = 'flclash' }
+        'v2rayn'      { $PROXY_MODE = 'v2rayn' }
+        'v2rayN'      { $PROXY_MODE = 'v2rayn' }
         'sing-box'    { $PROXY_MODE = 'sing-box' }
         'clashx'      { $PROXY_MODE = 'clashx' }
         'surge'       { $PROXY_MODE = 'surge' }
@@ -255,9 +261,12 @@ Write-Host "[OK] 锁定时区: $TZ_TARGET (按出口IP识别)" -ForegroundColor 
 
 # ---- 4. 安装文件 ----
 New-Item -ItemType Directory -Force -Path $BASE | Out-Null
-Copy-Item "$PSScriptRoot\claude-switch.ps1"   "$BASE\claude-switch.ps1" -Force
-Copy-Item "$PSScriptRoot\SwitcherUI.ps1"      "$BASE\SwitcherUI.ps1" -Force
+Copy-Item "$PSScriptRoot\claude-switch.ps1"    "$BASE\claude-switch.ps1" -Force
+Copy-Item "$PSScriptRoot\SwitcherUI.ps1"       "$BASE\SwitcherUI.ps1" -Force
 Copy-Item "$PSScriptRoot\claude-bodyguard.ps1" "$BASE\claude-bodyguard.ps1" -Force
+if (Test-Path -LiteralPath "$PSScriptRoot\claude-firewall.ps1") {
+    Copy-Item "$PSScriptRoot\claude-firewall.ps1" "$BASE\claude-firewall.ps1" -Force
+}
 
 # 写入探测到的客户端模式/代理组名/国家/时区/地区格式(替换串里的 $ 用 $$ 转义,避免被当作捕获组)
 $core = Get-Content "$BASE\claude-switch.ps1" -Raw
@@ -317,13 +326,30 @@ Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Whe
 Clear-DnsClientCache
 Write-Host "[OK] 时区已锁定 / IPv6 已关闭 / DNS 缓存已刷新" -ForegroundColor Green
 
-# ---- 8. 注册保镖计划任务 ----
+# ---- 8. 注册保镖计划任务(解除 72h 自动强杀与电池模式限制,修复 Issue #54) ----
 $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn
-Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action $action -Trigger $trigger -Force | Out-Null
+$settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Stop-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
 Start-ScheduledTask -TaskName 'ClaudeBodyguard'
-Write-Host "[OK] 保镖已注册并启动(计划任务,登录自动运行)" -ForegroundColor Green
+Write-Host "[OK] 保镖已注册并启动(已解除 72h 与电池限制,支持断网/热点事件监听)" -ForegroundColor Green
+
+# ---- 8b. 启用 Windows 防火墙内核防直连兜底 ----
+if (Test-Path -LiteralPath "$BASE\claude-firewall.ps1") {
+    try {
+        $fwMsg = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$BASE\claude-firewall.ps1" enable -Resolve
+        Write-Host "[OK] 防直连防火墙: $fwMsg" -ForegroundColor Green
+    } catch {
+        Write-Host "[WARN] 防直连防火墙暂未启用,可安装后在切换器点「一键修复」开启" -ForegroundColor Yellow
+    }
+}
 
 # ---- 9. 重启 Clash 使规则生效(仅 Clash Verge) ----
 if ($PROXY_MODE -eq 'clash-verge') {

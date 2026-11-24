@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
 # ============ 安装时可配置项(安装器自动改写) ============
-$PROXY_MODE = "clash-verge"            # 代理客户端: clash-verge|flclash|sing-box|clashx|surge|wireguard|other|auto
+$PROXY_MODE = "clash-verge"            # 代理客户端: clash-verge|flclash|v2rayn|sing-box|clashx|surge|wireguard|other|auto
 $COUNTRY_TARGET = "US"                 # 目标出口国家(安装时按出口自动识别)
 $TZ_TARGET = "Eastern Standard Time"   # Windows 时区ID
 $LOCALE_TARGET = "en-US"               # 地区格式目标(安装/set-region 自动写入)
@@ -207,7 +207,7 @@ function Get-CheckItemNames {
     # 全部检查项的名字,顺序与界面一致。新增检查项只改这一处,
     # 日志与诊断包不再各抄一份 —— 抄两份的下场就是加项时漏改一处,
     # 于是日志里少了那一项、诊断包里也少了那一项,却没人发现。
-    return @('代理内核','TUN网卡','出口IP','IP一致','时区','地区','IPv6','DNS','WebRTC','保镖','规则置顶','客户端语言','ASN属性','生态可达性','IP纯净度','IP代理标记','IP机房属性','IP黑名单')
+    return @('代理内核','TUN网卡','出口IP','IP一致','时区','地区','IPv6','DNS','WebRTC','保镖','防火墙兜底','规则置顶','客户端语言','ASN属性','生态可达性','IP纯净度','IP代理标记','IP机房属性','IP黑名单')
 }
 
 function Write-ClientLog([string]$Command, [int]$ExitCode, [long]$DurationMs, [string]$Summary = '') {
@@ -334,6 +334,7 @@ function Get-ProxyName {
     switch ($PROXY_MODE) {
         'clash-verge' { return 'Clash Verge' }
         'flclash'     { return 'FlClash' }
+        'v2rayn'      { return 'v2rayN' }
         'sing-box'    { return 'sing-box' }
         'clashx'      { return 'ClashX' }
         'surge'       { return 'Surge' }
@@ -349,13 +350,14 @@ function Test-ProxyAlive {
     switch ($PROXY_MODE) {
         'clash-verge' { return [bool](Get-Process -Name 'verge-mihomo' -ErrorAction SilentlyContinue) }
         'flclash'     { return [bool](Get-Process -Name 'FlClashCore','FlClash' -ErrorAction SilentlyContinue) }
+        'v2rayn'      { return [bool](Get-Process -Name 'v2rayN','xray','v2ray','sing-box','mihomo' -ErrorAction SilentlyContinue) }
         'sing-box'    { return [bool](Get-Process -Name 'sing-box' -ErrorAction SilentlyContinue) }
         'clashx'      { return [bool](Get-Process -Name 'ClashX' -ErrorAction SilentlyContinue) }
         'surge'       { return [bool](Get-Process -Name 'Surge' -ErrorAction SilentlyContinue) }
         'wireguard'   { return [bool](Get-Service -Name 'WireGuardTunnel*' -ErrorAction SilentlyContinue | Where-Object Status -eq 'Running') }
         'other'       { return $true }
         'auto' {
-            if (Get-Process -Name 'verge-mihomo','FlClashCore','FlClash','sing-box','ClashX','Surge' -ErrorAction SilentlyContinue) { return $true }
+            if (Get-Process -Name 'verge-mihomo','FlClashCore','FlClash','v2rayN','xray','v2ray','sing-box','mihomo','ClashX','Surge' -ErrorAction SilentlyContinue) { return $true }
             return [bool](Get-Service -Name 'WireGuardTunnel*' -ErrorAction SilentlyContinue | Where-Object Status -eq 'Running')
         }
         default { return [bool](Get-Process -Name 'verge-mihomo' -ErrorAction SilentlyContinue) }
@@ -364,14 +366,14 @@ function Test-ProxyAlive {
 
 function Get-Client {
     "client=$PROXY_MODE"
-    'clients=clash-verge,flclash,sing-box,clashx,surge,wireguard,other,auto'
+    'clients=clash-verge,flclash,v2rayn,sing-box,clashx,surge,wireguard,other,auto'
 }
 
 function Set-ClientMode([string]$Mode) {
-    $allowed = @('clash-verge','flclash','sing-box','clashx','surge','wireguard','other','auto')
+    $allowed = @('clash-verge','flclash','v2rayn','sing-box','clashx','surge','wireguard','other','auto')
     if ($allowed -notcontains $Mode) {
         $script:exitCode = 1
-        "FAIL:用法: claude-switch.ps1 set-client <clash-verge|flclash|sing-box|clashx|surge|wireguard|other|auto>"
+        "FAIL:用法: claude-switch.ps1 set-client <clash-verge|flclash|v2rayn|sing-box|clashx|surge|wireguard|other|auto>"
         return
     }
     $selfPath = $PSCommandPath
@@ -404,18 +406,225 @@ function Set-ClientMode([string]$Mode) {
     }
 }
 
-# TUN 在线判定:198.18 假IP段优先,否则回退到任意 Up 状态的虚拟网卡(兼容 Astrill/WireGuard/OpenVPN 等)
+# TUN 在线判定: 198.18 假IP段优先，其次 v2rayN/sing-box TUN 网段 (172.19/172.18/198.19)，最后回退到 Up 虚拟网卡
+# 同时校验最高优先级默认路由是否仍走 TUN (防止手机热点 USB/Wi-Fi 抢占默认路由)
 function Get-TunStatus {
-    if (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '198.18.*' }) {
-        return @{ up = $true; detail = '198.18 假IP段' }
+    $tunIndices = @()
+    $detail = ''
+    $fakeIps = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '198.18.*' -or $_.IPAddress -like '198.19.*' })
+    if ($fakeIps.Count -gt 0) {
+        $tunIndices += @($fakeIps | ForEach-Object { $_.InterfaceIndex })
+        $detail = '198.18 假IP段'
     }
-    $nic = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'TAP|TUN|WireGuard|Wintun|VPN|Tailscale') }
-    if ($nic) { return @{ up = $true; detail = '通用虚拟网卡' } }
-    return @{ up = $false; detail = '不在线' }
+    $v2TunIps = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '172.19.*' -or $_.IPAddress -like '172.18.*' })
+    if ($v2TunIps.Count -gt 0) {
+        $tunIndices += @($v2TunIps | ForEach-Object { $_.InterfaceIndex })
+        if (-not $detail) { $detail = 'v2rayN/sing-box TUN网段' }
+    }
+    $nics = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+        $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'TAP|TUN|WireGuard|Wintun|VPN|Tailscale|Sing-Box|Mihomo' -or $_.Name -match 'singbox_tun|sing-tun|v2rayN|Mihomo|Meta|utun')
+    })
+    if ($nics.Count -gt 0) {
+        $tunIndices += @($nics | ForEach-Object { $_.ifIndex })
+        if (-not $detail) { $detail = '通用虚拟网卡' }
+    }
+    $tunIndices = @($tunIndices | Select-Object -Unique)
+    if ($tunIndices.Count -eq 0) {
+        return @{ up = $false; routeOk = $false; detail = '不在线' }
+    }
+
+    # 默认路由优先级核验: 取 0.0.0.0/0 最小 (RouteMetric + InterfaceMetric) 的实际出接口
+    $routeOk = $true
+    $hijackAlias = ''
+    try {
+        $routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+        if ($routes.Count -gt 0) {
+            $best = $routes | Sort-Object { [int]$_.RouteMetric + [int]$_.InterfaceMetric } | Select-Object -First 1
+            if ($best -and ($tunIndices -notcontains $best.InterfaceIndex)) {
+                $routeOk = $false
+                $hijackAlias = [string]$best.InterfaceAlias
+            }
+        }
+    } catch {}
+
+    if (-not $routeOk) {
+        return @{ up = $false; routeOk = $false; detail = "默认路由被物理网卡($hijackAlias)抢占(可能已切到手机热点)" }
+    }
+    return @{ up = $true; routeOk = $true; detail = $detail }
 }
 function Test-TunUp {
     $t = Get-TunStatus
     return [bool]$t.up
+}
+
+function Get-FirewallScriptPath {
+    $candidates = @()
+    if ($PSScriptRoot) { $candidates += (Join-Path $PSScriptRoot 'claude-firewall.ps1') }
+    $candidates += (Join-Path $BASE 'claude-firewall.ps1')
+    foreach ($p in $candidates) {
+        if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+    }
+    return $null
+}
+
+function Get-FirewallStatusLine {
+    $fw = Get-FirewallScriptPath
+    if (-not $fw) { return '防火墙兜底=warn:未安装防直连防火墙模块(请重跑安装器)' }
+    try {
+        $out = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fw status 2>$null | Select-Object -Last 1)
+        if ($out -match '^(ok|warn|fail):') { return "防火墙兜底=$out" }
+    } catch {}
+    return '防火墙兜底=warn:无法读取 Windows 防火墙状态'
+}
+
+function Invoke-FirewallCommand([string]$SubAction = 'status') {
+    $fw = Get-FirewallScriptPath
+    if (-not $fw) {
+        $script:exitCode = 1
+        'FAIL:找不到 claude-firewall.ps1'
+        return
+    }
+    if ($SubAction -eq 'status') {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fw status
+        return
+    }
+    if ($SubAction -notin @('enable', 'refresh', 'disable')) {
+        $script:exitCode = 1
+        'FAIL:用法: claude-switch.ps1 firewall status|enable|refresh|disable'
+        return
+    }
+    $fwArg = if ($SubAction -eq 'refresh') { 'refresh' } else { $SubAction }
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $isAdmin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fw $fwArg
+        return
+    }
+    try {
+        Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$fw`" $fwArg"
+        Get-FirewallStatusLine
+    } catch {
+        $script:exitCode = 1
+        'FAIL:管理员授权被取消或执行失败'
+    }
+}
+
+# 保镖真实进程存活 + 计划任务 72h/电池限制审计 (修复 Issue #54)
+function Get-BodyguardStatusLine {
+    $bg = Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
+    if (-not $bg) { return '保镖=fail:未安装' }
+
+    $running = $false
+    try {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*claude-bodyguard.ps1*' })
+        $running = ($procs.Count -gt 0)
+    } catch {}
+    if (-not $running) {
+        return '保镖=fail:计划任务存在但保镖进程未运行(请点一键修复立即重启)'
+    }
+
+    $issues = @()
+    try {
+        $s = $bg.Settings
+        if ($s) {
+            if ($s.ExecutionTimeLimit -and $s.ExecutionTimeLimit -ne 'PT0S') { $issues += "存在时长上限($($s.ExecutionTimeLimit))" }
+            if ($s.DisallowStartIfOnBatteries -or $s.StopIfGoingOnBatteries) { $issues += '电池模式受限' }
+        }
+    } catch {}
+    if ($issues.Count -gt 0) {
+        return "保镖=warn:运行中但计划任务$($issues -join '、')(建议一键修复)"
+    }
+    return '保镖=ok:运行中(已解除72h/电池限制)'
+}
+
+# v2rayN 防直连路由规则审计与一键导出
+function Invoke-V2RayRules([string]$SubAction = 'check', [string]$TargetFile = '') {
+    $template = [ordered]@{
+        domainStrategy = 'IPIfNonMatch'
+        rules = @(
+            [ordered]@{
+                type = 'field'
+                domain = @(
+                    'domain:claude.ai', 'domain:claude.com', 'domain:anthropic.com',
+                    'domain:claudeusercontent.com', 'domain:challenges.cloudflare.com',
+                    'domain:datadoghq.com', 'domain:segment.io', 'domain:stripe.com',
+                    'domain:stripe.network', 'domain:stripecdn.com', 'domain:intercom.io',
+                    'domain:intercomcdn.com', 'domain:intercomassets.com'
+                )
+                outboundTag = 'proxy'
+            },
+            [ordered]@{
+                type = 'field'
+                network = 'udp'
+                port = '3478,5349,19302'
+                outboundTag = 'proxy'
+            }
+        )
+    }
+    if ($SubAction -eq 'export') {
+        $json = $template | ConvertTo-Json -Depth 6
+        if ($TargetFile) {
+            [System.IO.File]::WriteAllText($TargetFile, $json + "`n", (New-Object System.Text.UTF8Encoding($false)))
+            "OK:已导出 v2rayN 防直连路由规则到 $TargetFile"
+        } else {
+            $json
+        }
+        return
+    }
+
+    $candidates = @()
+    if ($TargetFile) { $candidates += $TargetFile }
+    try {
+        $v2p = Get-Process -Name 'v2rayN' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($v2p -and $v2p.Path) {
+            $dir = Split-Path -Parent $v2p.Path
+            $candidates += (Join-Path $dir 'guiConfigs\config.json')
+        }
+    } catch {}
+    $candidates += @(
+        "$env:APPDATA\v2rayN\guiConfigs\config.json",
+        "$env:LOCALAPPDATA\v2rayN\guiConfigs\config.json"
+    )
+    $cfg = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+    if (-not $cfg) {
+        'WARN:未发现本机 v2rayN config.json，可运行 v2ray-rules export 生成防直连规则'
+        return
+    }
+    try {
+        $data = Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $rules = @()
+        if ($data.routing -and $data.routing.rules) { $rules = @($data.routing.rules) }
+        elseif ($data.route -and $data.route.rules) { $rules = @($data.route.rules) }
+        $coreKws = @('claude.ai', 'anthropic.com', 'claudeusercontent.com')
+        $directHits = @()
+        $proxyHits = @()
+        foreach ($r in $rules) {
+            $tag = [string]($(if ($r.outboundTag) { $r.outboundTag } else { $r.outbound })).ToLowerInvariant()
+            $doms = @()
+            if ($r.domain) { $doms += @($r.domain) }
+            if ($r.domain_suffix) { $doms += @($r.domain_suffix) }
+            foreach ($kw in $coreKws) {
+                if ($doms | Where-Object { ([string]$_).ToLowerInvariant().Contains($kw) }) {
+                    if ($tag -in @('direct', 'freedom')) { $directHits += $kw }
+                    elseif ($tag -and $tag -notin @('block', 'blackhole')) { $proxyHits += $kw }
+                }
+            }
+        }
+        if ($directHits.Count -gt 0) {
+            $script:exitCode = 1
+            "FAIL:检测到 Anthropic 域名被配置为直连(direct): $(($directHits | Select-Object -Unique) -join ',')"
+            return
+        }
+        $missing = @($coreKws | Where-Object { $proxyHits -notcontains $_ })
+        if ($missing.Count -gt 0) {
+            "WARN:v2rayN 配置未显式置顶域名到 proxy: $($missing -join ',')"
+            return
+        }
+        'OK:已验证 v2rayN 路由规则强制代理且无 direct 回落'
+    } catch {
+        $script:exitCode = 1
+        "FAIL:无法解析 v2rayN 配置文件: $($_.Exception.Message)"
+    }
 }
 
 # 代理路径是否可用 —— 与保镖判定「代理离线就立刻杀 Claude」用的是同一组信号。
@@ -1332,6 +1541,12 @@ function Test-ClashScriptManaged {
 }
 
 function Get-RulesStatus {
+    if ($PROXY_MODE -eq 'v2rayn') {
+        $v2r = Invoke-V2RayRules 'check'
+        if ($v2r -like 'OK:*') { return "规则置顶=ok:$($v2r.Substring(3))" }
+        if ($v2r -like 'WARN:*') { return "规则置顶=warn:$($v2r.Substring(5))" }
+        return "规则置顶=fail:$($v2r -replace '^FAIL:', '')"
+    }
     $mode = Get-ClashMode
     if ($mode -eq 'global') { return '规则置顶=ok:全局模式(规则不适用)' }
     if ($mode -eq 'direct') { return '规则置顶=ok:直连模式(规则不适用)' }
@@ -1575,7 +1790,7 @@ function Invoke-CheckDetail {
     if ($tun.up) {
         if ($tun.detail -eq '198.18 假IP段') { "TUN网卡=ok" }
         else { "TUN网卡=ok:$($tun.detail)" }
-    } else { "TUN网卡=fail:不在线" }
+    } else { "TUN网卡=fail:$($tun.detail)" }
 
     $e = Get-Egress
     if ($e.skipped) { "出口IP=fail:代理路径失效,已跳过探测(避免真实 IP 出网)" }
@@ -1610,7 +1825,9 @@ function Invoke-CheckDetail {
         Format-OptionalResult 'DNS' 'ok'
     } else {
         $dns = (Resolve-DnsName claude.ai -Type A -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
-        if ($dns -like '198.18.*') { Format-OptionalResult 'DNS' 'ok' '走隧道' } else { Format-OptionalResult 'DNS' 'fail' "未走隧道($dns)" }
+        if ($dns -like '198.18.*' -or $dns -like '198.19.*') { Format-OptionalResult 'DNS' 'ok' '走隧道' }
+        elseif ($PROXY_MODE -eq 'v2rayn' -and $tun.up -and $dns) { Format-OptionalResult 'DNS' 'ok' "v2rayN TUN 隧道解析($dns)" }
+        else { Format-OptionalResult 'DNS' 'fail' "未走隧道($dns)" }
     }
 
     if (Test-CheckDisabled 'WebRTC') {
@@ -1620,8 +1837,8 @@ function Invoke-CheckDetail {
         Format-OptionalResult 'WebRTC' ([string]$w.code) ([string]$w.detail)
     }
 
-    $bg = Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
-    if ($bg) { "保镖=ok" } else { "保镖=fail:未安装" }
+    Get-BodyguardStatusLine
+    Get-FirewallStatusLine
 
     Get-RulesStatus
 
@@ -1816,23 +2033,28 @@ function Invoke-Fix {
         else { "FIX:TUN 未在线($pname),请检查客户端 TUN 开关" }
     }
 
-    # B. 时区/IPv6/DNS/保镖(需管理员:通过 UAC 弹一次)
+    # B. 时区/IPv6/DNS/保镖(解除72h与电池限制)/Windows防直连防火墙(需管理员:通过 UAC 弹一次)
     $adminScript = @()
     if ((Get-TimeZone).Id -ne $TZ_TARGET) { $adminScript += "Set-TimeZone -Id '$TZ_TARGET'" }
     if (Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled }) { $adminScript += "Get-NetAdapterBinding -ComponentID ms_tcpip6 | Disable-NetAdapterBinding -Confirm:`$false" }
     $adminScript += "Clear-DnsClientCache"
-    if (-not (Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue)) {
-        $adminScript += "`$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`"'; `$t = New-ScheduledTaskTrigger -AtLogOn; Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action `$a -Trigger `$t -Force | Out-Null; Start-ScheduledTask -TaskName 'ClaudeBodyguard'"
+    $bgLine = Get-BodyguardStatusLine
+    if ($bgLine -notlike '保镖=ok:*') {
+        $adminScript += "`$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`"'; `$t = New-ScheduledTaskTrigger -AtLogOn; `$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew; Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action `$a -Trigger `$t -Settings `$s -Force | Out-Null; Stop-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName 'ClaudeBodyguard'"
+    }
+    $fwPath = Get-FirewallScriptPath
+    if ($fwPath -and (Get-FirewallStatusLine) -notlike '防火墙兜底=ok:*') {
+        $adminScript += "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwPath`" enable -Resolve"
     }
     if ($adminScript.Count -gt 0) {
-        "FIX:修复时区/IPv6/DNS/保镖(需要管理员授权)..."
+        "FIX:修复时区/IPv6/DNS/保镖/Windows防火墙(需要管理员授权)..."
         $tmp = "$env:TEMP\claude-fix-$([guid]::NewGuid().Guid).ps1"
         ($adminScript -join "`n") | Out-File -Encoding utf8 $tmp
         try { Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmp`"" } catch { "FIX:管理员授权被取消" }
         Remove-Item $tmp -ErrorAction SilentlyContinue
-        "FIX:时区/IPv6/DNS/保镖 ✓"
+        "FIX:时区/IPv6/DNS/保镖/Windows防火墙 ✓"
     } else {
-        "FIX:时区/IPv6/保镖 无需修复 ✓"
+        "FIX:时区/IPv6/保镖/Windows防火墙 无需修复 ✓"
     }
 
     # B2. 置顶规则:先识别 Clash 模式,绝不盲目写 Merge.yaml
@@ -2880,7 +3102,7 @@ function Get-ReleaseInfo {
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         # GitHub 要求 User-Agent;PowerShell 5.1 的 -Headers 不允许改它,-UserAgent 等价写入请求头
-        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/YOURSJEYO/claude-switcher/releases/latest' -UserAgent 'ClaudeSwitcher' -TimeoutSec 8
+        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/Super-Zane/claude-switcher/releases/latest' -UserAgent 'ClaudeSwitcher' -TimeoutSec 8
         $latest = ([string]$rel.tag_name).Trim() -replace '^[vV]', ''
         if (-not $latest) { throw '无法解析最新版本号' }
 
@@ -2934,7 +3156,7 @@ function Invoke-UpdateNow {
 
     $previous = $info.current
     $tmp = Join-Path $env:TEMP ("claude-switcher-update-" + [guid]::NewGuid().ToString('N'))
-    $files = @('claude-switch.ps1', 'claude-bodyguard.ps1', 'SwitcherUI.ps1')
+    $files = @('claude-switch.ps1', 'claude-bodyguard.ps1', 'claude-firewall.ps1', 'SwitcherUI.ps1')
     $backupDir = $null
     $backedUp = @{}
     $task = Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
@@ -3128,6 +3350,8 @@ try {
         'check-update' { Invoke-CheckUpdate }
         'update-now'   { Invoke-UpdateNow }
         'rules-status' { Invoke-RulesStatus }
+        'firewall'     { Invoke-FirewallCommand $(if ($args.Count -gt 1) { [string]$args[1] } else { 'status' }) }
+        'v2ray-rules'  { Invoke-V2RayRules $(if ($args.Count -gt 1) { [string]$args[1] } else { 'check' }) $(if ($args.Count -gt 2) { [string]$args[2] } else { '' }) }
         'get-check-config' {
             $config = Get-CheckConfig
             $payload = [ordered]@{ disabled = @($config.disabled); allowOptionalFailures = [bool]$config.allowOptionalFailures; logging = [bool]$config.logging }

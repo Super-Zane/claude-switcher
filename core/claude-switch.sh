@@ -922,7 +922,7 @@ PY_CLASH_RULES
 fi
 
 # ============ 安装时可配置项(安装程序会自动改写) ============
-PROXY_MODE="clash-verge"       # 代理客户端: clash-verge|flclash|bettbox|shadowrocket|sing-box|clashx|surge|auto
+PROXY_MODE="clash-verge"       # 代理客户端: clash-verge|flclash|bettbox|shadowrocket|sing-box|clashx|surge|v2rayu|v2rayn|auto
 PROXY_GROUP="IpEqual"          # Clash 代理组名(安装时自动探测)
 COUNTRY_TARGET="US"            # 目标出口国家(安装时按出口自动识别)
 TZ_TARGET="America/New_York"   # 锁定时区,应与出口IP所在城市一致
@@ -970,8 +970,60 @@ log_result() {
     "$0" _support log "$command" "$rc" "$(( ($(date +%s) - started) * 1000 ))" "$summary" >/dev/null 2>&1 || true
 }
 
-# TUN 在线判定:存在 fake-ip 网段地址即视为 TUN 已接管(兼容各种 TUN 设备名)
-tun_up() { ifconfig 2>/dev/null | grep -q 'inet 198\.18\.'; }
+# 默认路由实际出接口探测 (用于发现手机热点/切网抢占 TUN 路由)
+default_route_iface() {
+    route -n get 1.1.1.1 2>/dev/null | awk '/interface:/{print $2; exit}'
+}
+
+default_route_via_tun() {
+    local iface
+    iface=$(default_route_iface)
+    case "$iface" in
+        utun[0-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# TUN 在线判定: 兼容 Clash fake-ip (198.18.x)、v2rayN/sing-box TUN (172.18/172.19/198.19.x) 及承担默认路由的 utun
+tun_up() {
+    local ifout
+    ifout=$(ifconfig 2>/dev/null)
+    if printf '%s\n' "$ifout" | grep -qE 'inet (198\.18\.|198\.19\.|172\.18\.|172\.19\.)'; then
+        return 0
+    fi
+    default_route_via_tun
+}
+
+# 定位 pf 内核防直连脚本(root 安装目录优先，其次脚本同目录)
+pf_firewall_script() {
+    local self_dir
+    self_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+    for p in \
+        "/Library/Application Support/claude-switcher/pf-firewall.sh" \
+        "${self_dir}/pf-firewall.sh" \
+        "$HOME/.local/bin/pf-firewall.sh"; do
+        if [ -r "$p" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+pf_firewall_status() {
+    local fw
+    fw=$(pf_firewall_script) || { echo "warn:未安装pf防直连模块"; return 1; }
+    /bin/bash "$fw" status 2>/dev/null
+}
+
+pf_firewall_active() {
+    local st
+    st=$(pf_firewall_status)
+    case "$st" in
+        ok:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # 代理客户端显示名(供检查细节输出)
 proxy_name() {
@@ -983,6 +1035,8 @@ proxy_name() {
         sing-box)     echo "sing-box" ;;
         clashx)       echo "ClashX" ;;
         surge)        echo "Surge" ;;
+        v2rayu)       echo "V2RayU" ;;
+        v2rayn)       echo "v2rayN" ;;
         auto)         echo "代理客户端" ;;
         *)            echo "$PROXY_MODE" ;;
     esac
@@ -997,6 +1051,8 @@ proxy_app_name() {
         shadowrocket) echo "Shadowrocket" ;;
         clashx)       echo "ClashX" ;;
         surge)        echo "Surge" ;;
+        v2rayu)       echo "V2RayU" ;;
+        v2rayn)       echo "v2rayN" ;;
         *)            echo "" ;;
     esac
 }
@@ -1020,6 +1076,108 @@ clashx_alive() {
         || pgrep -x 'ClashX Meta' >/dev/null 2>&1
 }
 
+# V2RayU (macOS): 识别 GUI 主进程及内置 v2ray-core / xray-core 进程
+v2rayu_alive() {
+    pgrep -f '/Contents/MacOS/V2RayU' >/dev/null 2>&1 \
+        || pgrep -x V2RayU >/dev/null 2>&1 \
+        || pgrep -f '\.V2RayU/(v2ray-core|xray-core)/(v2ray|xray)' >/dev/null 2>&1 \
+        || pgrep -f 'V2RayU.*(v2ray|xray)' >/dev/null 2>&1
+}
+
+# v2rayN (macOS v7+ Avalonia): 识别 GUI 主进程或其拉起的 xray/v2ray/sing-box/mihomo 内核
+v2rayn_alive() {
+    pgrep -f '/Contents/MacOS/v2rayN' >/dev/null 2>&1 \
+        || pgrep -x v2rayN >/dev/null 2>&1 \
+        || pgrep -f 'v2rayN.*(xray|v2ray|sing-box|mihomo)' >/dev/null 2>&1 \
+        || pgrep -x xray >/dev/null 2>&1 \
+        || pgrep -x v2ray >/dev/null 2>&1
+}
+
+# 探测 V2RayU / v2rayN 本机 HTTP/SOCKS 代理地址 (用于纯代理模式安全探测与 Claude 代理注入)
+v2ray_local_proxy_url() {
+    python3 - "$HOME" "$PROXY_MODE" <<'PY' 2>/dev/null || true
+import json, os, socket, sys
+
+home, mode = sys.argv[1], sys.argv[2]
+candidates = []
+
+def probe_port(port):
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.35):
+            return True
+    except Exception:
+        return False
+
+def add_cfg(path):
+    if not os.path.isfile(path):
+        return
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return
+    for ib in data.get("inbounds") or []:
+        if not isinstance(ib, dict):
+            continue
+        proto = str(ib.get("protocol", "")).lower()
+        port = ib.get("port")
+        if not isinstance(port, int) or port <= 0 or port > 65535:
+            continue
+        if proto in ("http", "mixed"):
+            candidates.append((f"http://127.0.0.1:{port}", port, 0))
+        elif proto == "socks":
+            candidates.append((f"socks5h://127.0.0.1:{port}", port, 1))
+
+if mode == "v2rayu":
+    add_cfg(os.path.join(home, ".V2RayU", "config.json"))
+    candidates.extend([
+        ("http://127.0.0.1:1087", 1087, 2),
+        ("socks5h://127.0.0.1:1080", 1080, 3),
+        ("http://127.0.0.1:10809", 10809, 4),
+    ])
+elif mode == "v2rayn":
+    add_cfg(os.path.join(home, "Library", "Application Support", "v2rayN", "guiConfigs", "config.json"))
+    candidates.extend([
+        ("http://127.0.0.1:10808", 10808, 2),
+        ("http://127.0.0.1:10809", 10809, 3),
+        ("socks5h://127.0.0.1:10808", 10808, 4),
+    ])
+
+seen = set()
+for url, port, _ in sorted(candidates, key=lambda x: x[2]):
+    if url in seen:
+        continue
+    seen.add(url)
+    if probe_port(port):
+        print(url)
+        sys.exit(0)
+PY
+}
+
+# 是否处于 V2RayU / v2rayN 纯本地代理 + pf 防直连兜底模式
+v2ray_proxy_only_ready() {
+    case "$PROXY_MODE" in
+        v2rayu|v2rayn) ;;
+        *) return 1 ;;
+    esac
+    proxy_alive || return 1
+    local purl
+    purl=$(v2ray_local_proxy_url)
+    [ -n "$purl" ] || return 1
+    pf_firewall_active || return 1
+    return 0
+}
+
+# 统一的出口安全 curl 封装: 优先直走 TUN; 纯代理模式下强制经由本机 V2Ray 端口，绝不裸连
+proxy_curl() {
+    if ! tun_up && v2ray_proxy_only_ready; then
+        local purl
+        purl=$(v2ray_local_proxy_url)
+        curl --proxy "$purl" "$@"
+    else
+        curl "$@"
+    fi
+}
+
 # 代理内核在线判定:按安装时识别的客户端分派;auto 时任一命中即活
 proxy_alive() {
     case "$PROXY_MODE" in
@@ -1030,13 +1188,209 @@ proxy_alive() {
         sing-box)     pgrep -f sing-box >/dev/null 2>&1 ;;
         clashx)       clashx_alive ;;
         surge)        pgrep -f Surge >/dev/null 2>&1 ;;
+        v2rayu)       v2rayu_alive ;;
+        v2rayn)       v2rayn_alive ;;
         auto)         pgrep -f verge-mihomo >/dev/null 2>&1 || shadowrocket_up \
                       || pgrep -f sing-box >/dev/null 2>&1 \
                       || pgrep -f FlClashCore >/dev/null 2>&1 || pgrep -x FlClash >/dev/null 2>&1 \
                       || pgrep -f BettboxCore >/dev/null 2>&1 || pgrep -x Bettbox >/dev/null 2>&1 \
                       || clashx_alive \
-                      || pgrep -f Surge >/dev/null 2>&1 ;;
+                      || pgrep -f Surge >/dev/null 2>&1 \
+                      || v2rayu_alive \
+                      || v2rayn_alive ;;
         *)            pgrep -f verge-mihomo >/dev/null 2>&1 ;;
+    esac
+}
+
+# 枚举所有启用的物理网络服务中未关闭 IPv6 的服务(覆盖 Wi-Fi / USB 手机热点 / 有线网卡)
+# 若在无 listallnetworkservices 桩的测试环境中，自动回退仅检测 Wi-Fi 保持兼容
+ipv6_enabled_services() {
+    local svcs svc info out=""
+    svcs=$(networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*')
+    if [ -z "$svcs" ]; then
+        info=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
+        if ! printf '%s\n' "$info" | grep -qi 'off'; then
+            echo "Wi-Fi"
+        fi
+        return 0
+    fi
+    while IFS= read -r svc; do
+        [ -n "$svc" ] || continue
+        info=$(networksetup -getinfo "$svc" 2>/dev/null)
+        # 仅检查有效分配或启用的 IPv6 配置 (跳过无 IPv6 行或明确 Off 的接口)
+        if printf '%s\n' "$info" | grep -qi '^IPv6:' && ! printf '%s\n' "$info" | grep -qi '^IPv6:.*off'; then
+            out="${out}${out:+$'\n'}${svc}"
+        fi
+    done <<< "$svcs"
+    [ -n "$out" ] && printf '%s\n' "$out"
+    return 0
+}
+
+# V2RayU / v2rayN 路由规则审计与生成器 (确保 Anthropic 域名强制走代理、严禁 direct)
+v2ray_rules() {
+    local action="${1:-check}"
+    local target="${2:-}"
+    python3 - "$action" "$target" "$HOME" "$PROXY_MODE" <<'PY'
+import json, os, sys
+
+action, target, home, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+ANTHROPIC_DOMAINS = [
+    "domain:claude.ai",
+    "domain:claude.com",
+    "domain:anthropic.com",
+    "domain:claudeusercontent.com",
+    "domain:challenges.cloudflare.com",
+    "domain:datadoghq.com",
+    "domain:segment.io",
+    "domain:stripe.com",
+    "domain:stripe.network",
+    "domain:stripecdn.com",
+    "domain:intercom.io",
+    "domain:intercomcdn.com",
+    "domain:intercomassets.com",
+]
+CORE_KEYWORDS = ("claude.ai", "anthropic.com", "claudeusercontent.com")
+
+TEMPLATE = {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+        {
+            "type": "field",
+            "domain": ANTHROPIC_DOMAINS,
+            "outboundTag": "proxy",
+        },
+        {
+            "type": "field",
+            "network": "udp",
+            "port": "3478,5349,19302",
+            "outboundTag": "proxy",
+        },
+    ],
+}
+
+if action == "export":
+    payload = json.dumps(TEMPLATE, ensure_ascii=False, indent=2) + "\n"
+    if target:
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(payload)
+        print(f"OK:已导出 V2Ray/Xray 防直连路由规则到 {target}")
+    else:
+        print(payload, end="")
+    sys.exit(0)
+
+paths = []
+if target:
+    paths.append(target)
+elif mode == "v2rayu":
+    paths.append(os.path.join(home, ".V2RayU", "config.json"))
+elif mode == "v2rayn":
+    paths.extend([
+        os.path.join(home, "Library", "Application Support", "v2rayN", "guiConfigs", "config.json"),
+        os.path.join(home, "Library", "Application Support", "v2rayN", "guiConfigs", "guiNConfig.json"),
+    ])
+else:
+    paths.extend([
+        os.path.join(home, ".V2RayU", "config.json"),
+        os.path.join(home, "Library", "Application Support", "v2rayN", "guiConfigs", "config.json"),
+    ])
+
+cfg_path = next((p for p in paths if os.path.isfile(p)), None)
+if not cfg_path:
+    print("WARN:未发现本机 V2RayU/v2rayN 配置文件，请使用 v2ray-rules export 生成防直连规则")
+    sys.exit(2)
+
+try:
+    data = json.load(open(cfg_path, encoding="utf-8"))
+except Exception as e:
+    print(f"FAIL:无法解析配置文件 {cfg_path}: {e}")
+    sys.exit(1)
+
+rules = []
+if isinstance(data, dict):
+    routing = data.get("routing") or {}
+    if isinstance(routing, dict):
+        rules = routing.get("rules") or []
+    elif isinstance(data.get("route"), dict):
+        rules = data["route"].get("rules") or []
+
+direct_hits = []
+proxy_hits = set()
+for r in rules:
+    if not isinstance(r, dict):
+        continue
+    out_tag = str(r.get("outboundTag") or r.get("outbound") or "").lower()
+    doms = r.get("domain") or r.get("domain_suffix") or []
+    if isinstance(doms, str):
+        doms = [doms]
+    doms_l = [str(d).lower() for d in doms]
+    for kw in CORE_KEYWORDS:
+        if any(kw in d for d in doms_l):
+            if out_tag in ("direct", "freedom"):
+                direct_hits.append(kw)
+            elif out_tag and out_tag not in ("block", "blackhole"):
+                proxy_hits.add(kw)
+
+if direct_hits:
+    print("FAIL:检测到 Anthropic 域名被配置为直连(direct): " + ",".join(sorted(set(direct_hits))))
+    sys.exit(1)
+
+missing = [kw for kw in CORE_KEYWORDS if kw not in proxy_hits]
+if missing:
+    print("WARN:配置中未显式置顶以下域名到 proxy: " + ",".join(missing))
+    sys.exit(2)
+
+print(f"OK:已验证 {os.path.basename(cfg_path)} 包含 Anthropic 强制代理规则且无 direct 回落")
+sys.exit(0)
+PY
+}
+
+# 统一启动 Claude 桌面版 (若处于 V2RayU/v2rayN 纯本地代理+pf模式，自动注入 --proxy-server)
+open_claude_app() {
+    if ! tun_up && v2ray_proxy_only_ready; then
+        local purl
+        purl=$(v2ray_local_proxy_url)
+        if [ -n "$purl" ]; then
+            open -a "Claude" --args "--proxy-server=$purl"
+            return $?
+        fi
+    fi
+    open -a "Claude"
+}
+
+# 执行防火墙操作(非 root 时走管理员授权)
+firewall_cmd() {
+    local sub="${1:-status}"
+    shift || true
+    local fw
+    fw=$(pf_firewall_script) || { echo "FAIL:找不到 pf-firewall.sh"; return 1; }
+    case "$sub" in
+        status|render)
+            /bin/bash "$fw" "$sub" "$@"
+            return $? ;;
+        enable|refresh|disable)
+            local extra=""
+            if [ "$sub" = "refresh" ] && ! tun_up && v2ray_proxy_only_ready; then
+                local purl
+                purl=$(v2ray_local_proxy_url)
+                [ -n "$purl" ] && extra="--proxy '$purl'"
+            fi
+            if [ "$(id -u)" -eq 0 ] || [ "${CLAUDE_PF_DRY_RUN:-0}" = "1" ]; then
+                if [ -n "$extra" ]; then
+                    eval "/bin/bash '$fw' '$sub' $extra"
+                else
+                    /bin/bash "$fw" "$sub" "$@"
+                fi
+                return $?
+            fi
+            local cmd_str="/bin/bash '$fw' '$sub'${extra:+ $extra}"
+            osascript <<ASEOF
+do shell script "$cmd_str" with prompt "Claude 切换器需要管理员权限配置系统 pf 防直连防火墙" with administrator privileges
+ASEOF
+            return $? ;;
+        *)
+            echo "用法: claude-switch.sh firewall status|enable|refresh|disable|render"
+            return 2 ;;
     esac
 }
 
@@ -1251,7 +1605,7 @@ asn_lookup() {
     local spec src url out rc code body parsed
     ASN_ORG=""
     ASN_REASON=""
-    if ! proxy_alive || ! tun_up; then
+    if ! proxy_alive || { ! tun_up && ! v2ray_proxy_only_ready; }; then
         ASN_REASON="代理路径未就绪"
         return 1
     fi
@@ -1310,11 +1664,34 @@ iphist_count() {
 check() {
     load_check_config || { echo "FAIL:检查配置无效，请恢复默认设置"; return 1; }
     fails=""
+    local proxy_only=0
+    local rt_if=""
 
     proxy_alive || fails="$fails;代理内核未运行"
-    tun_up || fails="$fails;TUN网卡不在线"
+    if tun_up; then
+        if declare -F default_route_iface >/dev/null 2>&1; then
+            rt_if=$(default_route_iface)
+            if [ -n "$rt_if" ] && ! default_route_via_tun; then
+                # 常见于切换手机热点(Wi-Fi/USB)瞬间，物理接口抢占了 TUN 默认路由
+                fails="$fails;默认路由未走TUN(当前接口:${rt_if})"
+            fi
+        fi
+    elif declare -F v2ray_proxy_only_ready >/dev/null 2>&1 && v2ray_proxy_only_ready; then
+        proxy_only=1
+    else
+        case "$PROXY_MODE" in
+            v2rayu|v2rayn)
+                fails="$fails;TUN网卡不在线且pf防直连未就绪" ;;
+            *)
+                fails="$fails;TUN网卡不在线" ;;
+        esac
+    fi
 
-    trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    if declare -F proxy_curl >/dev/null 2>&1; then
+        trace=$(proxy_curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    else
+        trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    fi
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
     [ "$loc" = "$COUNTRY_TARGET" ] || fails="$fails;出口IP异常(${ip:-无}/${loc:-未知},期望$COUNTRY_TARGET)"
@@ -1339,14 +1716,28 @@ check() {
     locale=$(defaults read -g AppleLocale 2>/dev/null)
     [ "$locale" = "$LOCALE_TARGET" ] || fails="$fails;地区异常($locale)"
 
-    v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
-    echo "$v6" | grep -qi 'off' || fails="$fails;IPv6未关闭"
+    if declare -F ipv6_enabled_services >/dev/null 2>&1; then
+        v6_svcs=$(ipv6_enabled_services)
+        if [ -n "$v6_svcs" ]; then
+            v6_list=$(printf '%s\n' "$v6_svcs" | tr '\n' ',' | sed 's/,$//')
+            fails="$fails;IPv6未关闭($v6_list)"
+        fi
+    else
+        v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
+        echo "$v6" | grep -qi 'off' || fails="$fails;IPv6未关闭"
+    fi
 
     if ! check_disabled "DNS"; then
         dnsip=$(dig +short +time=3 +tries=1 claude.ai 2>/dev/null | head -1)
         case "$dnsip" in
-            198.18.*) ;;
-            *) optional_failure "DNS未走隧道" ;;
+            198.18.*|198.19.*) ;;
+            *)
+                if [ "$proxy_only" -eq 1 ] || { [ "$PROXY_MODE" = "v2rayn" ] && default_route_via_tun; }; then
+                    # v2rayN Real-IP TUN 或 V2RayU 纯本地代理+pf 模式下域名非 198.18 fake-ip 属正常，仅当结果为空时报错
+                    [ -n "$dnsip" ] || optional_failure "DNS解析失败"
+                else
+                    optional_failure "DNS未走隧道"
+                fi ;;
         esac
     fi
 
@@ -1362,9 +1753,15 @@ check() {
         *) fails="$fails;保镖:状态无法验证" ;;
     esac
 
-    # 置顶规则:Clash Verge 验证运行内核;全局模式下全部流量走代理,规则不适用;其他客户端只看行为检测
+    # 置顶规则:Clash Verge 验证运行内核;全局模式下全部流量走代理,规则不适用;V2RayU/v2rayN 审计配置防 direct;其他客户端看行为检测
     if [ "$PROXY_MODE" = "clash-verge" ]; then
         [ "$(clash_mode)" = "global" ] || merge_ok || fails="$fails;运行中置顶规则未验证"
+    elif [ "$PROXY_MODE" = "v2rayu" ] || [ "$PROXY_MODE" = "v2rayn" ]; then
+        local v2r_out v2r_rc
+        v2r_out=$(v2ray_rules check 2>&1); v2r_rc=$?
+        if [ "$v2r_rc" -eq 1 ]; then
+            fails="$fails;V2Ray规则风险(${v2r_out#FAIL:})"
+        fi
     else
         route_ok || fails="$fails;置顶规则缺失(未命中:${ROUTE_MISSED# })"
     fi
@@ -1377,8 +1774,13 @@ check() {
     fi
 
     if ! check_disabled "生态可达性"; then
-        r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
-        r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
+        if declare -F proxy_curl >/dev/null 2>&1; then
+            r1=$(proxy_curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
+            r2=$(proxy_curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
+        else
+            r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
+            r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
+        fi
         { [ "$r1" = "000" ] || [ "$r2" = "000" ]; } && optional_failure "Anthropic生态不可达($r1/$r2)"
     fi
 
@@ -1481,6 +1883,7 @@ bodyguard_status() {
 # 逐项输出检查结果(供UI使用): 名称=ok|fail:细节
 checkdetail() {
     load_check_config || { echo "检查配置无效，请恢复默认设置"; return 1; }
+    local proxy_only=0 rt_if=""
     if proxy_alive; then
         case "$PROXY_MODE" in
             shadowrocket) echo '代理内核=ok:Shadowrocket 已连接' ;;
@@ -1489,8 +1892,23 @@ checkdetail() {
     else
         echo "代理内核=fail:$(proxy_name) 未运行"
     fi
-    if tun_up; then echo 'TUN网卡=ok'; else echo 'TUN网卡=fail:不在线'; fi
-    trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    if tun_up; then
+        rt_if=$(default_route_iface)
+        if [ -n "$rt_if" ] && ! default_route_via_tun; then
+            echo "TUN网卡=fail:默认路由被物理接口(${rt_if})抢占(常见于手机热点/切网)"
+        else
+            echo "TUN网卡=ok${rt_if:+:经由 $rt_if}"
+        fi
+    elif v2ray_proxy_only_ready; then
+        proxy_only=1
+        echo "TUN网卡=warn:$(proxy_name) 纯代理模式(pf 防直连兜底生效)"
+    else
+        case "$PROXY_MODE" in
+            v2rayu|v2rayn) echo 'TUN网卡=fail:未检测到TUN且pf防直连未就绪' ;;
+            *) echo 'TUN网卡=fail:不在线' ;;
+        esac
+    fi
+    trace=$(proxy_curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
     if [ "$loc" = "$COUNTRY_TARGET" ]; then echo "出口IP=ok:$ip/$loc"; else echo "出口IP=fail:${ip:-无}/${loc:-未知}(期望$COUNTRY_TARGET)"; fi
@@ -1519,15 +1937,27 @@ checkdetail() {
     if [ "$tz" = "/var/db/timezone/zoneinfo/$TZ_TARGET" ]; then echo '时区=ok'; else echo "时区=fail:$tz"; fi
     locale=$(defaults read -g AppleLocale 2>/dev/null)
     if [ "$locale" = "$LOCALE_TARGET" ]; then echo '地区=ok'; else echo "地区=fail:$locale"; fi
-    v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
-    if echo "$v6" | grep -qi 'off'; then echo 'IPv6=ok:已关闭'; else echo 'IPv6=fail:未关闭'; fi
+    v6_svcs=$(ipv6_enabled_services)
+    if [ -z "$v6_svcs" ]; then
+        echo 'IPv6=ok:已关闭(全活跃接口)'
+    else
+        v6_list=$(printf '%s\n' "$v6_svcs" | tr '\n' ',' | sed 's/,$//')
+        echo "IPv6=fail:未关闭($v6_list)"
+    fi
     if check_disabled "DNS"; then
         optional_result "DNS" ok
     else
         dnsip=$(dig +short +time=3 +tries=1 claude.ai 2>/dev/null | head -1)
         case "$dnsip" in
-            198.18.*) optional_result "DNS" ok "走隧道" ;;
-            *) optional_result "DNS" fail "未走隧道(${dnsip:-空})" ;;
+            198.18.*|198.19.*) optional_result "DNS" ok "走隧道" ;;
+            *)
+                if [ "$proxy_only" -eq 1 ]; then
+                    optional_result "DNS" ok "纯代理远端解析(pf防直连已启用)"
+                elif [ "$PROXY_MODE" = "v2rayn" ] && default_route_via_tun && [ -n "$dnsip" ]; then
+                    optional_result "DNS" ok "Real-IP TUN 经由隧道(${dnsip})"
+                else
+                    optional_result "DNS" fail "未走隧道(${dnsip:-空})"
+                fi ;;
         esac
     fi
     if check_disabled "WebRTC"; then
@@ -1539,7 +1969,8 @@ checkdetail() {
         optional_result "WebRTC" "$wrst" "$wrdt"
     fi
     echo "保镖=$(bodyguard_status)"
-    # 置顶规则:Clash Verge 验证运行内核;全局模式下规则不适用(全部流量已走代理)
+    echo "防火墙兜底=$(pf_firewall_status)"
+    # 置顶规则:Clash Verge 验证运行内核;全局模式下规则不适用;V2RayU/v2rayN 审计配置防直连
     if [ "$PROXY_MODE" = "clash-verge" ]; then
         if [ "$(clash_mode)" = "global" ]; then
             echo '规则置顶=ok:全局模式(全部流量走代理)'
@@ -1548,6 +1979,14 @@ checkdetail() {
         else
             echo '规则置顶=fail:未生效'
         fi
+    elif [ "$PROXY_MODE" = "v2rayu" ] || [ "$PROXY_MODE" = "v2rayn" ]; then
+        local v2r_out v2r_rc
+        v2r_out=$(v2ray_rules check 2>&1); v2r_rc=$?
+        case "$v2r_rc" in
+            0) echo "规则置顶=ok:${v2r_out#OK:}" ;;
+            2) echo "规则置顶=warn:${v2r_out#WARN:}" ;;
+            *) echo "规则置顶=fail:${v2r_out#FAIL:}" ;;
+        esac
     else
         if route_ok; then
             echo '规则置顶=ok:行为检测通过'
@@ -1591,8 +2030,8 @@ checkdetail() {
     if check_disabled "生态可达性"; then
         optional_result "生态可达性" ok
     else
-        r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
-        r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
+        r1=$(proxy_curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
+        r2=$(proxy_curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
         if [ "$r1" != "000" ] && [ "$r2" != "000" ]; then
             optional_result "生态可达性" ok "claude.ai:$r1 api:$r2"
         else
@@ -1724,28 +2163,42 @@ fix() {
         fi
     fi
 
-    # B. 时区/IPv6/DNS缓存/保镖(需管理员权限,会弹一次密码框)
+    # B. 时区/全接口IPv6/DNS缓存/保镖/pf防直连防火墙(需管理员权限,会弹一次密码框)
     tz=$(readlink /etc/localtime 2>/dev/null)
-    v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
+    v6_svcs=$(ipv6_enabled_services)
     adminCmds=""
     [ "$tz" != "/var/db/timezone/zoneinfo/$TZ_TARGET" ] && adminCmds="${adminCmds}/usr/sbin/systemsetup -settimezone $TZ_TARGET; "
-    echo "$v6" | grep -qi 'off' || adminCmds="${adminCmds}networksetup -setv6off Wi-Fi; "
+    if [ -n "$v6_svcs" ]; then
+        while IFS= read -r svc; do
+            [ -n "$svc" ] || continue
+            if [ "$svc" = "Wi-Fi" ]; then
+                adminCmds="${adminCmds}networksetup -setv6off Wi-Fi; "
+            else
+                adminCmds="${adminCmds}networksetup -setv6off '$svc'; "
+            fi
+        done <<< "$v6_svcs"
+    fi
     if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
         adminCmds="${adminCmds}cp -X $HOME/.local/bin/local.claude-bodyguard.plist /Library/LaunchDaemons/ || exit 1; /usr/bin/xattr -d com.apple.quarantine /Library/LaunchDaemons/local.claude-bodyguard.plist 2>/dev/null || true; chown root:wheel /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; chmod 644 /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; launchctl bootstrap system /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || exit 1; "
     fi
+    local fw_script
+    fw_script=$(pf_firewall_script 2>/dev/null || true)
+    if [ -n "$fw_script" ] && ! pf_firewall_active; then
+        adminCmds="${adminCmds}/bin/bash '$fw_script' enable --resolve; "
+    fi
     if [ -n "$adminCmds" ]; then
         adminCmds="${adminCmds}dscacheutil -flushcache; killall -HUP mDNSResponder"
-        echo "FIX:修复时区/IPv6/DNS/保镖(需要密码)..."
+        echo "FIX:修复时区/全接口IPv6/DNS/保镖/pf防火墙(需要密码)..."
         if osascript <<ASEOF >/dev/null 2>&1
 do shell script "$adminCmds" with prompt "一键修复需要管理员权限" with administrator privileges
 ASEOF
         then
-            echo "FIX:时区/IPv6/DNS/保镖 ✓"
+            echo "FIX:时区/IPv6/DNS/保镖/pf防火墙 ✓"
         else
-            echo "FIX:时区/IPv6/保镖 ✗(取消或失败)"
+            echo "FIX:时区/IPv6/保镖/pf防火墙 ✗(取消或失败)"
         fi
     else
-        echo "FIX:时区/IPv6/保镖 无需修复 ✓"
+        echo "FIX:时区/IPv6/保镖/pf防火墙 无需修复 ✓"
     fi
 
     # B3. Claude 客户端单独设英文(用户级,无需密码;系统首选语言已是英文则跳过)
@@ -1818,8 +2271,8 @@ ASEOF
 set_client() {
     mode="${1:-}"
     case "$mode" in
-        clash-verge|flclash|bettbox|shadowrocket|sing-box|clashx|surge|auto) ;;
-        *) echo "FAIL:用法: claude-switch.sh set-client <clash-verge|flclash|bettbox|shadowrocket|sing-box|clashx|surge|auto>"; return 1 ;;
+        clash-verge|flclash|bettbox|shadowrocket|sing-box|clashx|surge|v2rayu|v2rayn|auto) ;;
+        *) echo "FAIL:用法: claude-switch.sh set-client <clash-verge|flclash|bettbox|shadowrocket|sing-box|clashx|surge|v2rayu|v2rayn|auto>"; return 1 ;;
     esac
     target="${CLAUDE_SWITCHER_CORE:-}"
     if [ -z "$target" ]; then
@@ -1839,14 +2292,14 @@ set_client() {
         fail:未安装) echo "INFO:保镖尚未安装,checkdetail 会提示未安装" ;;
         fail:*) echo "WARN:保镖校验未通过(${guard_state#fail:});请重新运行安装器同步 root 守护脚本(需管理员权限),完成前不要启动 Claude" ;;
     esac
-    echo "INFO:重新运行 checkdetail 生效;非 Clash 客户端请在应用内自行添加 Claude 域名置顶规则"
+    echo "INFO:重新运行 checkdetail 生效;非 Clash 客户端请在应用内自行添加 Claude 域名置顶规则(V2RayU/v2rayN 可运行 v2ray-rules export)"
     return 0
 }
 
 # 只读输出当前代理客户端(供 UI 下拉高亮),同时列出全部支持项
 get_client() {
     echo "client=$PROXY_MODE"
-    echo "clients=clash-verge,flclash,bettbox,shadowrocket,sing-box,clashx,surge"
+    echo "clients=clash-verge,flclash,bettbox,shadowrocket,sing-box,clashx,surge,v2rayu,v2rayn"
 }
 
 # 地区自适应:按当前出口国家一键重设 国家/时区/地区格式(换了国家节点后运行)
@@ -1944,8 +2397,9 @@ self_update() {
         echo "# $(date '+%F %T') update --auto 开始"
     fi
 
+    local repo="${CLAUDE_SWITCHER_REPO:-Super-Zane/claude-switcher}"
     tmpd=$(mktemp -d)
-    if ! curl -sL --max-time 30 "https://codeload.github.com/YOURSJEYO/claude-switcher/zip/refs/heads/main" -o "$tmpd/main.zip" \
+    if ! curl -sL --max-time 30 "https://codeload.github.com/${repo}/zip/refs/heads/main" -o "$tmpd/main.zip" \
         || ! unzip -q "$tmpd/main.zip" -d "$tmpd" 2>/dev/null; then
         echo "FAIL:下载或解压失败(网络问题,稍后再试)"; rm -rf "$tmpd"; return 1
     fi
@@ -1955,7 +2409,7 @@ self_update() {
     fi
 
     # 工件完整性校验:逐项比对仓库 SHA256SUMS,任一不符即中止(防传输篡改;信任根为 GitHub 仓库本身)
-    if ! curl -sL --max-time 15 "https://raw.githubusercontent.com/YOURSJEYO/claude-switcher/main/SHA256SUMS" -o "$tmpd/SHA256SUMS" \
+    if ! curl -sL --max-time 15 "https://raw.githubusercontent.com/${repo}/main/SHA256SUMS" -o "$tmpd/SHA256SUMS" \
         || [ ! -s "$tmpd/SHA256SUMS" ]; then
         echo "FAIL:无法获取校验清单(SHA256SUMS),已中止"; rm -rf "$tmpd"; return 1
     fi
@@ -2404,7 +2858,13 @@ run_cli() {
         mkdir -p "$BASE/cli-accounts" "$dir" || { echo "FAIL:无法创建 CLI 账号目录"; return 1; }
         chmod 700 "$BASE/cli-accounts" "$dir" || { echo "FAIL:无法保护 CLI 账号目录"; return 1; }
     fi
-    CLAUDE_CONFIG_DIR="$dir" "$cli_path" "$@" &
+    if ! tun_up && v2ray_proxy_only_ready; then
+        local purl
+        purl=$(v2ray_local_proxy_url)
+        CLAUDE_CONFIG_DIR="$dir" HTTPS_PROXY="$purl" HTTP_PROXY="$purl" ALL_PROXY="$purl" "$cli_path" "$@" &
+    else
+        CLAUDE_CONFIG_DIR="$dir" "$cli_path" "$@" &
+    fi
     pid=$!
     cli_lock_release
     wait "$pid"
@@ -2604,7 +3064,7 @@ switch_to() {
         if [ -d "$BASE/keep-stage" ]; then
             restore_keep_paths || { echo "FAIL:跨身份保留还原失败，暂存保留在 $BASE/keep-stage"; return 1; }
         fi
-        open -a "Claude"
+        open_claude_app
         echo "INFO:当前已是账号$target"
         return 0
     fi
@@ -2654,7 +3114,7 @@ switch_to() {
         fi
     fi
 
-    open -a "Claude"
+    open_claude_app
     log "已切换到账号$target 并启动 ($(( $(date +%s) - t0 ))s)"
     echo "OK:已切换到账号$target ($(( $(date +%s) - t0 ))s)"
     return 0
@@ -2695,8 +3155,10 @@ case "$operation" in
     get-check-config) "$0" _support config-get ;;
     set-check-config) "$0" _support config-set "${2:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
+    firewall) firewall_cmd "${@:2}" ;;
+    v2ray-rules) v2ray_rules "${2:-check}" "${3:-}" ;;
     fingerprint) fingerprint ;;
-    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|quit-claude|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|firewall status|enable|refresh|disable|render|v2ray-rules [check|export [file]]|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|quit-claude|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac
 # checkdetail 分支内部已保存返回码;其他分支取 case 的最终状态。
 # 判断本身会改变 $?，所以必须先捕获 dispatch_rc，再按操作类型落 rc。
