@@ -15,7 +15,14 @@ CFG_FILE="$APP_DIR/config.env"
 PF_ANCHOR_NAME="${CLAUDE_GUARD_ANCHOR:-com.claude-guard}"
 PF_CONF="${CLAUDE_GUARD_PF_CONF:-/etc/pf.conf}"
 PF_ANCHOR_FILE="${CLAUDE_GUARD_ANCHOR_FILE:-/etc/pf.anchors/${PF_ANCHOR_NAME}}"
+PF_CN_FILE="${CLAUDE_GUARD_CN_FILE:-/etc/pf.anchors/${PF_ANCHOR_NAME}.cn.txt}"
+PF_BOOT_LABEL="com.claude-guard.pfboot"
+PF_BOOT_PLIST="${CLAUDE_GUARD_BOOT_PLIST:-/Library/LaunchDaemons/${PF_BOOT_LABEL}.plist}"
 HOSTS_FILE="${CLAUDE_GUARD_HOSTS:-/etc/hosts}"
+
+ANTHROPIC_ASN_V4="160.79.104.0/21"
+ANTHROPIC_ASN_V6="2607:6bc0::/48"
+ANTHROPIC_DOMAINS="claude.ai claude.com api.anthropic.com claudeusercontent.com platform.claude.com console.anthropic.com statsig.anthropic.com"
 
 PF_BEGIN="# BEGIN claude-guard-pf"
 PF_END="# END claude-guard-pf"
@@ -30,6 +37,7 @@ COUNTRY_TARGET=""    # 期望出口国家码，如 US / JP / SG
 TZ_TARGET=""         # 期望 IANA 时区，如 America/New_York
 LOCALE_TARGET=""     # 期望地区格式，如 en_US
 ALLOW_LAN_DNS="0"    # 默认封死物理网卡 53 端口裸 DNS (入口域名由 hosts 托管块解析)
+PERSISTENT_LOCK="0"  # 持久化防直连硬锁开关 (1=开启: 代理退出/软件退出/重启后仍阻断直连，直到手动关闭)
 
 load_cfg() {
     [ -f "$CFG_FILE" ] && source "$CFG_FILE" 2>/dev/null || true
@@ -43,6 +51,7 @@ COUNTRY_TARGET="${COUNTRY_TARGET}"
 TZ_TARGET="${TZ_TARGET}"
 LOCALE_TARGET="${LOCALE_TARGET}"
 ALLOW_LAN_DNS="${ALLOW_LAN_DNS}"
+PERSISTENT_LOCK="${PERSISTENT_LOCK}"
 EOF
     chmod 600 "$CFG_FILE" 2>/dev/null || true
 }
@@ -139,15 +148,66 @@ detect_tun_info() {
     return 1
 }
 
-# 生成方案 A 严格白名单 pf 锚点规则 (纯文本输出，供 enable 与测试校验)
+# 动态解析 Claude/Anthropic 生态域名公网 IPv4 (用于叠加锁定，自动跳过 Fake-IP 与白名单入口 IP)
+resolve_claude_ips() {
+    local whitelist_csv="${1:-}"
+    python3 - "$ANTHROPIC_ASN_V4" "$ANTHROPIC_DOMAINS" "$whitelist_csv" <<'PY' 2>/dev/null || echo "$ANTHROPIC_ASN_V4"
+import ipaddress, json, re, subprocess, sys
+
+asn_v4, domains_s, wl_csv = sys.argv[1], sys.argv[2], sys.argv[3]
+wl = {x.strip() for x in re.split(r'[\s,]+', wl_csv) if x.strip()}
+items = [asn_v4]
+seen = {asn_v4}
+
+for dom in domains_s.split():
+    try:
+        out = subprocess.check_output(
+            ["curl", "-s", "--max-time", "4", "-H", "accept: application/dns-json",
+             f"https://cloudflare-dns.com/dns-query?name={dom}&type=A"],
+            stderr=subprocess.DEVNULL, text=True, timeout=5
+        )
+        for ans in (json.loads(out).get("Answer") or []):
+            ip_s = str(ans.get("data", "")).strip()
+            try:
+                ip = ipaddress.ip_address(ip_s)
+            except ValueError:
+                continue
+            if ip.version == 4 and ip.is_global and ip not in ipaddress.ip_network("198.18.0.0/15"):
+                if str(ip) not in wl and str(ip) not in seen:
+                    seen.add(str(ip))
+                    items.append(str(ip))
+    except Exception:
+        pass
+print(", ".join(items))
+PY
+}
+
+find_cn_list_src() {
+    local self_dir
+    self_dir="$(cd "$(dirname "$0")" && pwd)"
+    for p in "${self_dir}/../data/cn-ipv4.txt" "${self_dir}/cn-ipv4.txt"; do
+        if [ -r "$p" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 生成持久化防直连硬锁 pf 锚点规则:
+#   mode=cn     (锁1·国内直连放行): 放行国内 CN 段 + 局域网 + 代理入口 + TUN; 0ms 死锁 Claude(ASN+域名IP) + 一切海外 + IPv6 + STUN
+#   mode=strict (锁1·全封闭模式):   仅放行代理入口 + 局域网(非DNS) + DHCP + TUN; 0ms 死锁全部公网(含国内+海外+Claude+IPv6+STUN)
 render_pf_rules() {
-    local ip_csv="$1"
+    local ip_csv="${1:-}"
     local tun_if="${2:-}"
     local tun_ip="${3:-}"
     local allow_lan_dns="${4:-0}"
+    local cn_file="${5:-$PF_CN_FILE}"
+    local claude_v4="${6:-$ANTHROPIC_ASN_V4}"
+    local lock_mode="${7:-cn}"
 
-    if [ -z "$ip_csv" ]; then
-        echo "FAIL:白名单入口节点 IP 为空，拒绝生成全封规则（否则会彻底断网）" >&2
+    if [ "$lock_mode" = "strict" ] && [ -z "$ip_csv" ]; then
+        echo "FAIL:全封闭模式必须先配置代理入口节点 IP/域名，否则会无法连接代理" >&2
         return 1
     fi
 
@@ -161,52 +221,76 @@ render_pf_rules() {
     fi
 
     cat <<EOF
-# Claude 安全锁 (方案 A: 严格白名单 Kill-Switch)
-# 仅允许本机回环、代理 TUN 虚拟网卡、DHCP、局域网(非DNS)与白名单代理入口节点 IP 出站
-table <claude_guard_entries> persist { ${ip_csv} }
+# Claude 持久化防直连硬锁 (pf Anchor: ${PF_ANCHOR_NAME}, mode=${lock_mode})
+# 策略: 代理退出/软件被杀/系统死机重启后依然内核生效，直到用户再次打开软件解开锁2
+table <claude_blocked_v4> persist { ${claude_v4} }
+table <claude_blocked_v6> persist { ${ANTHROPIC_ASN_V6} }
 table <claude_guard_lan> const { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }
+EOF
+    if [ -n "$ip_csv" ]; then
+        echo "table <claude_guard_entries> persist { ${ip_csv} }"
+    else
+        echo "table <claude_guard_entries> persist"
+    fi
+    if [ "$lock_mode" = "cn" ] && [ -n "$cn_file" ] && [ -r "$cn_file" ]; then
+        echo "table <claude_guard_cn> persist file \"${cn_file}\""
+    else
+        echo "table <claude_guard_cn> persist"
+    fi
 
-# 0. 封死所有物理网卡公网 IPv6 出站 (根治运营商手机热点强推 IPv6 泄露)
+    cat <<EOF
+
+# 0. 封死所有物理网卡公网 IPv6 出站并记录内核丢包日志 (根治运营商手机热点强推 IPv6 泄露)
 pass out quick on lo0 inet6 all
 pass out quick inet6 to fe80::/10
-block drop out quick inet6 all
+block drop out log quick inet6 to <claude_blocked_v6>
+block drop out log quick inet6 all
 
-# 1. 放行本机回环 (所有代理客户端本地监听端口)
+# 1. 放行本机回环 + DHCP + 代理 TUN 虚拟网段 (开全局+TUN 时 Claude 与海外服务全速走隧道)
 pass out quick on lo0 all
-
-# 2. 放行 DHCP (确保切换 Wi-Fi / 插拔手机热点可正常获取局域网 IP)
 pass out quick inet proto udp from any port 68 to any port 67
-
-# 3. 放行代理 TUN 虚拟网段流量 (不依赖 utun 编号漂移)
 pass out quick inet from { ${tun_sources} } to any
 EOF
     if [ -n "$tun_if" ]; then
-        echo "# 3b. 同步放行当前承载默认路由的代理接口"
+        echo "# 1b. 同步放行当前承载默认路由的代理接口"
         echo "pass out quick on ${tun_if} all"
     fi
 
     cat <<EOF
 
-# 4. 放行白名单代理入口节点 IP (第一跳 VPS / 链式代理入口)
+# 2. 放行白名单代理入口节点 IP (第一跳海外 VPS / 链式代理入口; 国内中转机在 cn 模式下也自动放行)
 pass out quick inet to <claude_guard_entries>
+
+# 3. 物理网卡最高优先级硬锁: 阻断 Claude/Anthropic 官方 ASN 与生态域名 IP (全协议)，以及非隧道 STUN/WebRTC UDP 端口
+block drop out log quick inet to <claude_blocked_v4>
+block drop out log quick inet proto udp to any port { 3478, 5349, 19302 }
 EOF
 
-    if [ "$allow_lan_dns" != "1" ]; then
+    if [ "$lock_mode" = "strict" ]; then
+        if [ "$allow_lan_dns" != "1" ]; then
+            cat <<EOF
+
+# 4. 全封闭模式: 阻断物理网卡向局域网路由器/运营商发送裸 DNS 查询 (入口域名由本机 hosts 托管)
+block drop out log quick inet proto { tcp, udp } to <claude_guard_lan> port 53
+EOF
+        fi
         cat <<EOF
 
-# 5. 阻断物理网卡向局域网路由器/运营商发送裸 DNS 查询 (入口域名由本机 hosts 托管)
-block drop out quick inet proto { tcp, udp } to <claude_guard_lan> port 53
+# 5. 仅放行局域网常规通信，其余全部物理公网(含国内+海外) 0ms DROP 并记 pflog0 日志
+pass out quick inet to <claude_guard_lan>
+block drop out log quick inet all
+EOF
+    else
+        cat <<EOF
+
+# 4. 国内直连放行模式: 放行局域网与中国大陆直连服务(关代理/退软件时国内正常上网不受影响)
+pass out quick inet to <claude_guard_lan>
+pass out quick inet to <claude_guard_cn>
+
+# 5. 默认兜底硬锁: 阻断一切其他海外公网服务直连并记录 pflog0 拦截日志 (直至手动解开锁2)
+block drop out log quick inet all
 EOF
     fi
-
-    cat <<EOF
-
-# 6. 放行局域网常规通信 (网关/内网设备)
-pass out quick inet to <claude_guard_lan>
-
-# 7. 默认兜底 Fail-Closed: 阻断所有其他物理网卡公网出站 (直连 Anthropic / WebRTC STUN / 裸 DNS 全部 0ms DROP)
-block drop out quick inet all
-EOF
 }
 
 write_managed_block() {
@@ -328,10 +412,31 @@ _apply_lock_root() {
     local allow_dns="$5"
     local tz_to_set="${6:-}"
     local disable_v6="${7:-0}"
+    local cn_src="${8:-}"
+    local claude_v4="${9:-$ANTHROPIC_ASN_V4}"
+    local lock_mode="${10:-cn}"
+
+    local cn_target="$PF_CN_FILE"
+    if [ "$lock_mode" = "cn" ]; then
+        if [ "${CLAUDE_GUARD_DRY_RUN:-0}" = "1" ]; then
+            cn_target="$cn_src"
+        else
+            mkdir -p "$(dirname "$PF_ANCHOR_FILE")" || { echo "FAIL:无法创建锚点目录"; return 1; }
+            if [ -n "$cn_src" ] && [ -r "$cn_src" ]; then
+                cp "$cn_src" "$PF_CN_FILE" || { echo "FAIL:无法安装中国大陆直连 IP 表"; return 1; }
+                chmod 644 "$PF_CN_FILE"
+            else
+                echo "FAIL:缺少中国大陆直连 IP 表(cn-ipv4.txt)，已中止以防误断国内直连"
+                return 1
+            fi
+        fi
+    else
+        cn_target=""
+    fi
 
     local tmp_anchor
     tmp_anchor=$(mktemp "${TMPDIR:-/tmp}/claude-guard-pf.XXXXXX") || { echo "FAIL:无法创建临时文件"; return 1; }
-    if ! render_pf_rules "$ip_csv" "$tun_if" "$tun_ip" "$allow_dns" > "$tmp_anchor"; then
+    if ! render_pf_rules "$ip_csv" "$tun_if" "$tun_ip" "$allow_dns" "$cn_target" "$claude_v4" "$lock_mode" > "$tmp_anchor"; then
         rm -f "$tmp_anchor"
         return 1
     fi
@@ -344,7 +449,7 @@ _apply_lock_root() {
     if [ "${CLAUDE_GUARD_DRY_RUN:-0}" = "1" ]; then
         cat "$tmp_anchor"
         rm -f "$tmp_anchor"
-        echo "OK:安全锁演练通过"
+        echo "OK:持久化硬锁演练通过 (mode=${lock_mode})"
         return 0
     fi
 
@@ -378,10 +483,32 @@ load anchor \"${PF_ANCHOR_NAME}\" from \"${PF_ANCHOR_FILE}\""
         return 1
     fi
     pfctl -e >/dev/null 2>&1 || true
+
+    # 安装开机持久化 LaunchDaemon: 确保代理退出、软件退出、甚至系统重启后 pf 硬锁依然持续生效，直到用户手动关闭
+    mkdir -p "$(dirname "$PF_BOOT_PLIST")" 2>/dev/null || true
+    cat > "$PF_BOOT_PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>${PF_BOOT_LABEL}</string>
+    <key>ProgramArguments</key><array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>/sbin/pfctl -f ${PF_CONF} &amp;&amp; /sbin/pfctl -e</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+</dict></plist>
+PLISTEOF
+    /usr/bin/xattr -d com.apple.quarantine "$PF_BOOT_PLIST" 2>/dev/null || true
+    chown root:wheel "$PF_BOOT_PLIST" 2>/dev/null || true
+    chmod 644 "$PF_BOOT_PLIST" 2>/dev/null || true
+    launchctl bootout "system/${PF_BOOT_LABEL}" 2>/dev/null || true
+    launchctl bootstrap system "$PF_BOOT_PLIST" 2>/dev/null || true
+
     dscacheutil -flushcache 2>/dev/null || true
     killall -HUP mDNSResponder 2>/dev/null || true
 
-    echo "OK:安全锁已启用 (仅放行 TUN + 白名单入口节点)"
+    echo "OK:持久化防直连硬锁已启用 (代理退出/本软件退出/重启后仍生效，已开启 pflog 丢包日志)"
 }
 
 _apply_unlock_root() {
@@ -389,14 +516,69 @@ _apply_unlock_root() {
         echo "OK:直连模式演练通过"
         return 0
     fi
+    launchctl bootout "system/${PF_BOOT_LABEL}" 2>/dev/null || true
+    rm -f "$PF_BOOT_PLIST" 2>/dev/null || true
     pfctl -a "$PF_ANCHOR_NAME" -F all >/dev/null 2>&1 || true
-    rm -f "$PF_ANCHOR_FILE" 2>/dev/null || true
+    rm -f "$PF_ANCHOR_FILE" "$PF_CN_FILE" 2>/dev/null || true
     remove_managed_block "$PF_CONF" "$PF_BEGIN" "$PF_END"
     remove_managed_block "$HOSTS_FILE" "$HOSTS_BEGIN" "$HOSTS_END"
     pfctl -f "$PF_CONF" >/dev/null 2>&1 || true
     dscacheutil -flushcache 2>/dev/null || true
     killall -HUP mDNSResponder 2>/dev/null || true
-    echo "OK:已恢复直连模式 (防火墙锁已完全解除)"
+    echo "OK:持久化防直连硬锁已关闭，已恢复直连模式 (防火墙锚点、开机守护与 hosts 托管项已彻底清除)"
+}
+
+_verify_firewall_root() {
+    echo "=== 操作系统防火墙与内核流量拦截日志验收 (macOS pf) ==="
+    echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "----------------------------------------------------------"
+
+    local pf_status="未知"
+    local info_out
+    info_out=$(pfctl -s info 2>&1 || true)
+    if printf '%s\n' "$info_out" | grep -qi 'Status: Enabled'; then
+        pf_status="Enabled (内核防火墙运行中)"
+    elif printf '%s\n' "$info_out" | grep -qi 'Status: Disabled'; then
+        pf_status="Disabled (未启用)"
+    fi
+    echo "[1] pf 内核总开关状态: ${pf_status}"
+
+    if [ -f "$PF_BOOT_PLIST" ]; then
+        local ld_state="已落盘(重启自动加载)"
+        launchctl print "system/${PF_BOOT_LABEL}" >/dev/null 2>&1 && ld_state="已注册并生效(代理/软件退出及重启后均持续锁定)"
+        echo "[2] 开机持久化守护 (${PF_BOOT_LABEL}): ${ld_state}"
+    else
+        echo "[2] 开机持久化守护 (${PF_BOOT_LABEL}): 未安装 (重启后防火墙不会自动开启)"
+    fi
+
+    echo "[3] 内核内存白名单表 (<claude_guard_entries>):"
+    local tbl_out
+    tbl_out=$(pfctl -a "$PF_ANCHOR_NAME" -t claude_guard_entries -T show 2>/dev/null || true)
+    if [ -n "$tbl_out" ]; then
+        printf '%s\n' "$tbl_out" | sed 's/^/    /'
+    else
+        echo "    (空 / 锚点未加载)"
+    fi
+
+    echo "[4] 内核阻断规则与实时丢包计数 (pfctl -a ${PF_ANCHOR_NAME} -sr -v):"
+    local rules_v
+    rules_v=$(pfctl -a "$PF_ANCHOR_NAME" -sr -v 2>/dev/null || true)
+    if [ -n "$rules_v" ]; then
+        printf '%s\n' "$rules_v" | sed 's/^/    /'
+    else
+        echo "    (无活动规则)"
+    fi
+
+    echo "[5] 实时抓取内核拦截数据包日志命令 (验收时可在终端直接观察被 DROP 的包):"
+    echo "    sudo tcpdump -n -e -ttt -i pflog0"
+    echo "----------------------------------------------------------"
+    if [ "$pf_status" = "Enabled (内核防火墙运行中)" ] && printf '%s\n' "$rules_v" | grep -q 'block drop out log quick'; then
+        echo "验收结论: [✓] 操作系统防火墙硬锁已实装生效，代理与软件退出后仍持续阻断直连"
+        return 0
+    else
+        echo "验收结论: [✗] 操作系统防火墙硬锁未处于完全锁定状态"
+        return 1
+    fi
 }
 
 run_as_admin() {
@@ -418,7 +600,12 @@ ASEOF
 cmd_set_nodes() {
     load_cfg
     local raw="${1:-}"
-    [ -n "$raw" ] || { echo "FAIL:请提供至少一个代理入口节点 IP 或域名"; return 1; }
+    if [ -z "$raw" ]; then
+        ENTRY_NODES=""
+        save_cfg
+        echo "OK:已清空海外入口白名单(国内中转机仍自动放行)"
+        return 0
+    fi
     local parsed ips
     parsed=$(resolve_entries "$raw")
     ips=$(printf '%s\n' "$parsed" | sed -n 's/^IP://p')
@@ -432,21 +619,30 @@ cmd_lock() {
     load_cfg
     local tz_set="${1:-}"
     local dis_v6="${2:-0}"
-    if [ -z "$ENTRY_NODES" ]; then
-        echo "FAIL:尚未配置代理入口节点 IP/域名，请先执行「一键初始化」或「设置入口节点」"
-        return 1
+    local lock_mode="${3:-cn}"
+    local cn_src=""
+    if [ "$lock_mode" = "cn" ]; then
+        cn_src=$(find_cn_list_src) || { echo "FAIL:找不到中国大陆直连 IP 表 (portable-kit/data/cn-ipv4.txt)"; return 1; }
     fi
-    local parsed ip_csv hosts_lines tun_info tun_if tun_ip
-    parsed=$(resolve_entries "$ENTRY_NODES")
-    ip_csv=$(printf '%s\n' "$parsed" | sed -n 's/^IP://p' | paste -sd ',' - | sed 's/,/, /g')
-    hosts_lines=$(printf '%s\n' "$parsed" | sed -n 's/^HOST://p')
-    if [ -z "$ip_csv" ]; then
-        echo "FAIL:未能解析出有效入口 IPv4，请检查节点配置或先恢复直连后再解析域名"
+
+    local parsed="" ip_csv="" hosts_lines="" tun_info tun_if tun_ip claude_v4
+    if [ -n "$ENTRY_NODES" ]; then
+        parsed=$(resolve_entries "$ENTRY_NODES")
+        ip_csv=$(printf '%s\n' "$parsed" | sed -n 's/^IP://p' | paste -sd ',' - | sed 's/,/, /g')
+        hosts_lines=$(printf '%s\n' "$parsed" | sed -n 's/^HOST://p')
+    fi
+    if [ "$lock_mode" = "strict" ] && [ -z "$ip_csv" ]; then
+        echo "FAIL:开启「全封闭模式」前请先配置第一跳代理入口 IP 或域名"
         return 1
     fi
     tun_info=$(detect_tun_info || true)
     tun_if="${tun_info%%|*}"
     tun_ip="${tun_info#*|}"
+    if [ "${CLAUDE_GUARD_DRY_RUN:-0}" = "1" ] || [ "${CLAUDE_GUARD_OFFLINE:-0}" = "1" ]; then
+        claude_v4="$ANTHROPIC_ASN_V4"
+    else
+        claude_v4=$(resolve_claude_ips "$ip_csv")
+    fi
 
     local self_path
     self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -454,25 +650,43 @@ cmd_lock() {
     local hosts_b64
     hosts_b64=$(printf '%s' "$hosts_lines" | base64 | tr -d '\n')
     local root_cmd
-    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' /bin/bash '${self_path}' _root-lock '${ip_csv}' '${hosts_b64}' '${tun_if}' '${tun_ip}' '${ALLOW_LAN_DNS}' '${tz_set}' '${dis_v6}'"
-    run_as_admin "$root_cmd" "Claude 安全锁需要管理员权限以开启系统级防直连保护"
+    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_CN_FILE='${PF_CN_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' /bin/bash '${self_path}' _root-lock '${ip_csv}' '${hosts_b64}' '${tun_if}' '${tun_ip}' '${ALLOW_LAN_DNS}' '${tz_set}' '${dis_v6}' '${cn_src}' '${claude_v4}' '${lock_mode}'"
+    if run_as_admin "$root_cmd" "Claude 安全锁需要管理员权限以开启持久化防直连硬锁"; then
+        PERSISTENT_LOCK="$lock_mode"
+        save_cfg
+        return 0
+    fi
+    return 1
 }
 
 cmd_unlock() {
+    load_cfg
     echo "正在安全关闭 Claude 桌面版与 Claude Code CLI（防止切回直连瞬间泄露）..."
     stop_claude_safely
     local self_path
     self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     local root_cmd
-    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' /bin/bash '${self_path}' _root-unlock"
-    run_as_admin "$root_cmd" "Claude 安全锁需要管理员权限以恢复正常直连网络"
+    root_cmd="CLAUDE_GUARD_DRY_RUN='${CLAUDE_GUARD_DRY_RUN:-0}' CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' CLAUDE_GUARD_HOSTS='${HOSTS_FILE}' /bin/bash '${self_path}' _root-unlock"
+    if run_as_admin "$root_cmd" "Claude 安全锁需要管理员权限以关闭持久化防直连硬锁并恢复直连"; then
+        PERSISTENT_LOCK="0"
+        save_cfg
+        return 0
+    fi
+    return 1
+}
+
+cmd_verify_firewall() {
+    local self_path
+    self_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    local root_cmd
+    root_cmd="CLAUDE_GUARD_PF_CONF='${PF_CONF}' CLAUDE_GUARD_ANCHOR_FILE='${PF_ANCHOR_FILE}' CLAUDE_GUARD_BOOT_PLIST='${PF_BOOT_PLIST}' /bin/bash '${self_path}' _root-verify-firewall"
+    run_as_admin "$root_cmd" "验收需要管理员权限以读取操作系统 pf 防火墙状态与内核丢包日志计数"
 }
 
 cmd_init() {
     load_cfg
     local nodes="${1:-$ENTRY_NODES}"
     local manual_country="${2:-}"
-    [ -n "$nodes" ] || { echo "FAIL:请提供代理入口节点 IP 或域名"; return 1; }
 
     local geo cc tz ip
     if [ -n "$manual_country" ]; then
@@ -484,8 +698,8 @@ cmd_init() {
         cc=$(printf '%s' "$geo" | cut -d'|' -f1)
         tz=$(printf '%s' "$geo" | cut -d'|' -f2)
         ip=$(printf '%s' "$geo" | cut -d'|' -f3)
-        if [ -z "$cc" ] || [ "$cc" = "CN" ]; then
-            echo "FAIL:当前出口为 ${cc:-未知}(IP=${ip:-无})，请先打开代理客户端「全局 + TUN」后再初始化"
+        if [ -z "$cc" ] || [ "$cc" = "CN" ] || [ "$cc" = "HK" ] || [ "$cc" = "MO" ]; then
+            echo "FAIL:当前出口为 ${cc:-未知}(IP=${ip:-无})，属于不支持地区！请先打开代理客户端「全局 + TUN」切至海外支持地区后再初始化"
             return 1
         fi
         [ -n "$tz" ] || tz=$(default_tz_for "$cc")
@@ -503,18 +717,30 @@ cmd_init() {
     defaults write -g AppleLocale "$LOCALE_TARGET" 2>/dev/null || true
     defaults write com.anthropic.claudefordesktop AppleLanguages -array en-US 2>/dev/null || true
 
-    # 一次性管理员授权: 锁时区 + 关闭全接口 IPv6 + 启用方案 A 内核安全锁
-    cmd_lock "$TZ_TARGET" "1" || return 1
-    echo "OK:一键初始化完成 | 出口=${cc}(${ip}) | 时区=${TZ_TARGET} | 地区=${LOCALE_TARGET} | Claude语言=en-US | 全接口IPv6=已关闭 | 内核安全锁=已启用"
+    # 默认开启「国内直连放行 + 硬锁 Claude 与海外」持久化硬锁 (如填写了入口且需要全封闭，可随时在锁1切换)
+    cmd_lock "$TZ_TARGET" "1" "cn" || return 1
+    echo "OK:一键初始化完成 | 出口=${cc}(${ip}) | 时区=${TZ_TARGET} | 地区=${LOCALE_TARGET} | Claude语言=en-US | 全接口IPv6=已关闭 | 持久化硬锁(放行国内/死锁Claude与海外)=已开启"
 }
 
 cmd_status() {
     load_cfg
     local lock_state="off"
+    local lock_mode="off"
+    local boot_persist="off"
     if [ -f "$PF_ANCHOR_FILE" ] && grep -Fq "$PF_BEGIN" "$PF_CONF" 2>/dev/null; then
         lock_state="on"
+        if grep -Fq 'mode=strict' "$PF_ANCHOR_FILE" 2>/dev/null; then
+            lock_mode="strict"
+        else
+            lock_mode="cn"
+        fi
+    fi
+    if [ -f "$PF_BOOT_PLIST" ]; then
+        boot_persist="on"
     fi
     echo "LOCK=${lock_state}"
+    echo "LOCK_MODE=${lock_mode}"
+    echo "PERSISTENT_LOCK=${boot_persist}"
     echo "ENTRY_NODES=${ENTRY_NODES:-未配置}"
     echo "COUNTRY_TARGET=${COUNTRY_TARGET:-未配置}"
     echo "TZ_TARGET=${TZ_TARGET:-未配置}"
@@ -529,7 +755,7 @@ cmd_check() {
         local extra=()
         [ -n "$export_path" ] && extra+=(--export "$export_path")
         [ "${CLAUDE_GUARD_OFFLINE:-0}" = "1" ] && extra+=(--offline)
-        python3 "$audit_py" --config "$CFG_FILE" --pf-conf "$PF_CONF" --pf-anchor "$PF_ANCHOR_FILE" "${extra[@]}"
+        python3 "$audit_py" --config "$CFG_FILE" --pf-conf "$PF_CONF" --pf-anchor "$PF_ANCHOR_FILE" --pf-boot-plist "$PF_BOOT_PLIST" "${extra[@]}"
         return $?
     fi
     load_cfg
@@ -540,19 +766,21 @@ cmd_check() {
 cmd="${1:-status}"
 shift || true
 case "$cmd" in
-    init)      cmd_init "${1:-}" "${2:-}" ;;
-    set-nodes) cmd_set_nodes "${1:-}" ;;
-    lock)      cmd_lock "${1:-}" "${2:-0}" ;;
-    unlock)    cmd_unlock ;;
-    status)    cmd_status ;;
-    check)     cmd_check "${1:-}" ;;
+    init)        cmd_init "${1:-}" "${2:-}" ;;
+    set-nodes)   cmd_set_nodes "${1:-}" ;;
+    lock|lock-cn) cmd_lock "${1:-}" "${2:-0}" "cn" ;;
+    lock-strict) cmd_lock "${1:-}" "${2:-0}" "strict" ;;
+    unlock|unlock-all) cmd_unlock ;;
+    status)      cmd_status ;;
+    check)       cmd_check "${1:-}" ;;
+    verify-firewall) cmd_verify_firewall ;;
     export-report)
         out_f="${1:-$HOME/Desktop/claude-env-report-$(date +%Y%m%d-%H%M%S).txt}"
         cmd_check "$out_f"
         rc=$?
         echo "REPORT_FILE=$out_f"
         exit "$rc" ;;
-    render)    render_pf_rules "$@" ;;
+    render)      render_pf_rules "$@" ;;
     _root-lock)
         ip_csv="${1:-}"
         hosts_b64="${2:-}"
@@ -561,14 +789,19 @@ case "$cmd" in
         allow_dns="${5:-0}"
         tz_set="${6:-}"
         dis_v6="${7:-0}"
+        cn_src="${8:-}"
+        claude_v4="${9:-$ANTHROPIC_ASN_V4}"
+        lock_mode="${10:-cn}"
         hosts_decoded=""
         if [ -n "$hosts_b64" ]; then
             hosts_decoded=$(printf '%s' "$hosts_b64" | base64 -D 2>/dev/null || printf '%s' "$hosts_b64" | base64 -d 2>/dev/null || true)
         fi
-        _apply_lock_root "$ip_csv" "$hosts_decoded" "$tun_if" "$tun_ip" "$allow_dns" "$tz_set" "$dis_v6" ;;
+        _apply_lock_root "$ip_csv" "$hosts_decoded" "$tun_if" "$tun_ip" "$allow_dns" "$tz_set" "$dis_v6" "$cn_src" "$claude_v4" "$lock_mode" ;;
     _root-unlock)
         _apply_unlock_root ;;
+    _root-verify-firewall)
+        _verify_firewall_root ;;
     *)
-        echo "用法: claude-guard.sh init <入口IP或域名> [国家码] | set-nodes <入口IP或域名> | lock | unlock | status | check"
+        echo "用法: claude-guard.sh init <入口IP或域名> [国家码] | set-nodes <入口IP或域名> | lock | unlock | verify-firewall | status | check | export-report [文件]"
         exit 2 ;;
 esac

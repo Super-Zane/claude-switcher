@@ -234,18 +234,21 @@ def run_audit(args):
     target_tz = cfg.get("TZ_TARGET", "")
     target_loc = cfg.get("LOCALE_TARGET", "")
 
-    # 1. 内核级防直连安全锁 (方案 A)
+    # 1. 内核级持久化防直连硬锁 (方案 A+: 放行国内直连 + 阻断 Claude ASN/IP 与一切海外服务)
     lock_on = False
+    boot_persist = os.path.isfile(args.pf_boot_plist)
     if os.path.isfile(args.pf_anchor) and os.path.isfile(args.pf_conf):
         try:
             if "# BEGIN claude-guard-pf" in open(args.pf_conf, encoding="utf-8", errors="ignore").read():
                 lock_on = True
         except OSError:
             pass
-    if lock_on:
-        add("killswitch", "防直连安全锁 (pf)", "ok", f"已开启 (白名单入口={entry_nodes or '已配'})")
+    if lock_on and boot_persist:
+        add("killswitch", "持久化防直连硬锁 (pf)", "ok", f"已开启并注册开机守护 (锁Claude与海外/放行国内; 白名单入口={entry_nodes or '国内中转'})")
+    elif lock_on:
+        add("killswitch", "持久化防直连硬锁 (pf)", "warn", f"pf 锚点已开启但缺少开机守护，建议在控制台重新开启硬锁开关")
     else:
-        add("killswitch", "防直连安全锁 (pf)", "fail", "未开启 (处于直连模式，请先点「开启安全锁」)")
+        add("killswitch", "持久化防直连硬锁 (pf)", "fail", "未开启 (当前处于允许直连状态，请先打开「持久化防直连硬锁」开关)")
 
     # 2. TUN 虚拟网卡与默认路由归属
     rc_rt, rt_out = run_cmd(["route", "-n", "get", "1.1.1.1"])
@@ -569,6 +572,7 @@ def main():
     parser.add_argument("--config", default=os.path.expanduser("~/.claude-guard/config.env"))
     parser.add_argument("--pf-conf", default="/etc/pf.conf")
     parser.add_argument("--pf-anchor", default="/etc/pf.anchors/com.claude-guard")
+    parser.add_argument("--pf-boot-plist", default="/Library/LaunchDaemons/com.claude-guard.pfboot.plist")
     parser.add_argument("--json", action="store_true", help="输出 JSON 格式报告")
     parser.add_argument("--export", default="", help="将脱敏体检报告另存到指定文件")
     parser.add_argument("--offline", action="store_true", help="离线演练模式(不发外部网络请求，用于单元测试)")

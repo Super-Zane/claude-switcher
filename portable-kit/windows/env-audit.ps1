@@ -171,7 +171,7 @@ function Test-WssUpgrade([string]$TargetHost = 'claude.ai', [int]$Port = 443, [i
 }
 
 # 读取配置
-$cfg = @{ entryNodes = ''; countryTarget = ''; tzTarget = ''; localeTarget = '' }
+$cfg = @{ entryNodes = ''; countryTarget = ''; tzTarget = ''; localeTarget = ''; lockMode = '' }
 if (Test-Path -LiteralPath $ConfigPath) {
     try {
         $j = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -179,16 +179,24 @@ if (Test-Path -LiteralPath $ConfigPath) {
         if ($j.countryTarget) { $cfg.countryTarget = [string]$j.countryTarget }
         if ($j.tzTarget) { $cfg.tzTarget = [string]$j.tzTarget }
         if ($j.localeTarget) { $cfg.localeTarget = [string]$j.localeTarget }
+        if ($j.lockMode) { $cfg.lockMode = [string]$j.lockMode }
     } catch {}
 }
 
-# 1. 防直连内核安全锁
+# 1. 持久化硬锁 (WFP) + 拦截日志验收
 $fwRules = @(Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' })
+$fwProfs = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue)
+$fwAllOn = ($fwProfs.Count -gt 0 -and (@($fwProfs | Where-Object { -not $_.Enabled }).Count -eq 0))
+$fwLogOn = ($fwProfs.Count -gt 0 -and (@($fwProfs | Where-Object { -not $_.LogBlocked }).Count -eq 0))
 $lockOn = ($fwRules.Count -ge 2)
-if ($lockOn) {
-    Add-AuditItem 'killswitch' '防直连安全锁 (WFP)' 'ok' "已开启 ($($fwRules.Count)条规则, 入口=$($cfg.entryNodes))"
+$modeLabel = if ($cfg.lockMode -eq 'strict') { '全封闭模式' } elseif ($cfg.lockMode -eq 'cn') { '国内直连放行/海外与Claude死锁' } else { '已锁定' }
+if ($lockOn -and $fwAllOn) {
+    $logStr = if ($fwLogOn) { '拦截日志已开' } else { '拦截日志未全开' }
+    Add-AuditItem 'killswitch' '持久化硬锁 (WFP 防火墙)' 'ok' "锁2持久化生效 · 锁1=$modeLabel ($($fwRules.Count)条规则, $logStr, 入口=$($cfg.entryNodes))"
+} elseif ($lockOn) {
+    Add-AuditItem 'killswitch' '持久化硬锁 (WFP 防火墙)' 'warn' "已写入 $($fwRules.Count) 条规则，但部分 Windows 防火墙配置档未启用"
 } else {
-    Add-AuditItem 'killswitch' '防直连安全锁 (WFP)' 'fail' '未开启 (当前处于直连模式，请先点「开启安全锁」)'
+    Add-AuditItem 'killswitch' '持久化硬锁 (WFP 防火墙)' 'fail' '锁2已解开 (无持久化防火墙锁，切勿启动任何 Claude 服务！)'
 }
 
 # 2. TUN 虚拟网卡与默认路由归属
