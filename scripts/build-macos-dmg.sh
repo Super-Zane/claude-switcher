@@ -20,18 +20,29 @@ python3 "$ROOT_DIR/scripts/generate-icons.py" "$ICON_DIR"
 # 同步保存 Windows ICO 供 NSIS 打包复用
 cp -f "$ICON_DIR/app.ico" "$KIT_DIR/windows/app.ico"
 
-# 2. 构建 100% 自包含 Claude安全锁.app
+# 2. 构建 100% 自包含、Claude 暖米风格原生 SwiftUI 通用二进制 Claude安全锁.app (arm64 + x86_64)
 DMG_SRC="$STAGE_DIR/dmg-root"
 mkdir -p "$DMG_SRC"
 APP="$DMG_SRC/Claude安全锁.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/kit/mac" "$APP/Contents/Resources/kit/data"
 
 cp -f "$ICON_DIR/app.icns" "$APP/Contents/Resources/app.icns"
-cp -f "$KIT_DIR/mac/claude-guard.sh" "$KIT_DIR/mac/Claude安全锁控制台.command" "$KIT_DIR/mac/env-audit.py" "$APP/Contents/Resources/kit/mac/"
+cp -f "$KIT_DIR/mac/claude-guard.sh" "$KIT_DIR/mac/env-audit.py" "$APP/Contents/Resources/kit/mac/"
 cp -f "$KIT_DIR/data/cn-ipv4.txt" "$APP/Contents/Resources/kit/data/"
 chmod 755 "$APP/Contents/Resources/kit/mac/claude-guard.sh" \
-          "$APP/Contents/Resources/kit/mac/Claude安全锁控制台.command" \
           "$APP/Contents/Resources/kit/mac/env-audit.py"
+
+MOD_CACHE="$STAGE_DIR/swift-modcache"
+mkdir -p "$MOD_CACHE"
+swiftc -O -target arm64-apple-macos12.0 -module-cache-path "$MOD_CACHE" \
+    -framework SwiftUI -framework AppKit \
+    "$KIT_DIR/mac/ClaudeGuardApp.swift" -o "$STAGE_DIR/ClaudeGuard-arm64"
+swiftc -O -target x86_64-apple-macos12.0 -module-cache-path "$MOD_CACHE" \
+    -framework SwiftUI -framework AppKit \
+    "$KIT_DIR/mac/ClaudeGuardApp.swift" -o "$STAGE_DIR/ClaudeGuard-x64"
+lipo -create "$STAGE_DIR/ClaudeGuard-arm64" "$STAGE_DIR/ClaudeGuard-x64" \
+    -output "$APP/Contents/MacOS/ClaudeGuard"
+chmod 755 "$APP/Contents/MacOS/ClaudeGuard"
 
 cat > "$APP/Contents/Info.plist" <<'PLISTEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -49,19 +60,12 @@ cat > "$APP/Contents/Info.plist" <<'PLISTEOF'
     <key>CFBundleShortVersionString</key><string>2.1.0</string>
     <key>CFBundleVersion</key><string>210</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
-    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 PLISTEOF
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
-
-cat > "$APP/Contents/MacOS/ClaudeGuard" <<'LAUNCHEOF'
-#!/bin/bash
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-KIT_MAC="$(cd "$SELF_DIR/../Resources/kit/mac" && pwd)"
-exec /bin/bash "$KIT_MAC/Claude安全锁控制台.command"
-LAUNCHEOF
-chmod 755 "$APP/Contents/MacOS/ClaudeGuard"
+codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
 
 # 3. 构建独立 卸载Claude安全锁.app
 UNINST="$DMG_SRC/卸载Claude安全锁.app"
@@ -121,9 +125,11 @@ ASEOF
 UNLAUNCHEOF
 chmod 755 "$UNINST/Contents/MacOS/ClaudeGuardUninstall"
 
-# 4. 添加 Applications 拖拽安装软链接与使用说明
+# 4. 添加 Applications 拖拽安装软链接、使用说明、防漏覆写模板与断网急救指南
 ln -s /Applications "$DMG_SRC/Applications"
 cp -f "$KIT_DIR/README-交付手册.md" "$DMG_SRC/使用说明.md"
+cp -f "$KIT_DIR/templates/断网急救.txt" "$DMG_SRC/断网急救.txt"
+cp -f "$KIT_DIR/templates/Clash-Verge-防漏覆写模板.yaml" "$DMG_SRC/Clash-Verge-防漏覆写模板.yaml"
 
 # 5. 生成标准压缩 DMG 磁盘映像
 OUT_DMG="$DIST_DIR/Claude安全锁-macOS.dmg"

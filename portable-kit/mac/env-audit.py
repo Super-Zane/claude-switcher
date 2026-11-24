@@ -277,22 +277,40 @@ def run_audit(args):
     else:
         add("tun", "全局 TUN 与默认路由", "fail", f"未检测到 TUN (当前默认路由={rt_if or '断网'})")
 
-    # 3. 本地系统 DNS 审计 (参考 TZZ520/claude-environment-check)
+    # 3. 本地系统 DNS 审计 + isp.ac 上游 DNS 出口实测 (防大陆 DNS 泄露)
     _, dns_out = run_cmd(["scutil", "--dns"])
     dns_servers = sorted(set(re.findall(r"nameserver\[\d+\]\s*:\s*([0-9a-fA-F.:]+)", dns_out)))
     cn_hits = [s for s in dns_servers if s in CN_DNS_SERVERS]
     _, dig_out = run_cmd(["dig", "+short", "+time=3", "+tries=1", "claude.ai"])
     claude_dns = dig_out.strip().splitlines()[0] if dig_out.strip() else ""
-    if cn_hits and not (claude_dns.startswith("198.18.") or claude_dns.startswith("198.19.")):
-        add("dns", "本地 DNS 与泄露信号", "fail", f"发现大陆 DNS({','.join(cn_hits)}) 且 claude.ai 解析={claude_dns or '空'}")
+    upstream_dns_cn = []
+    upstream_dns_note = ""
+    if not args.offline:
+        st_dl, dl_data, _, _ = http_get_json("https://isp.ac/dns-leak-test", timeout=5)
+        if st_dl == 200 and dl_data:
+            entries = dl_data if isinstance(dl_data, list) else (dl_data.get("servers") or dl_data.get("results") or [dl_data] if isinstance(dl_data, dict) else [])
+            ccs = []
+            for e in entries:
+                if isinstance(e, dict):
+                    cc_v = str(e.get("country_code") or e.get("country") or "").upper()
+                    if cc_v:
+                        ccs.append(cc_v)
+                        if cc_v in ("CN", "CHINA"):
+                            upstream_dns_cn.append(str(e.get("ip") or cc_v))
+            if ccs:
+                upstream_dns_note = f"; 上游DNS={','.join(sorted(set(ccs))[:3])}"
+    if upstream_dns_cn:
+        add("dns", "本地与上游 DNS 泄露", "fail", f"上游 DNS 出口检出中国大陆服务器({','.join(upstream_dns_cn[:2])})")
+    elif cn_hits and not (claude_dns.startswith("198.18.") or claude_dns.startswith("198.19.")):
+        add("dns", "本地与上游 DNS 泄露", "fail", f"发现大陆 DNS({','.join(cn_hits)}) 且 claude.ai 解析={claude_dns or '空'}{upstream_dns_note}")
     elif claude_dns.startswith("198.18.") or claude_dns.startswith("198.19."):
-        add("dns", "本地 DNS 与泄露信号", "ok", f"Fake-IP 隧道接管 (claude.ai={claude_dns})")
+        add("dns", "本地与上游 DNS 泄露", "ok", f"Fake-IP 隧道接管 (claude.ai={claude_dns}{upstream_dns_note})")
     elif claude_dns:
         state = "warn" if cn_hits else "ok"
         extra = f"; 系统含大陆DNS({','.join(cn_hits)})" if cn_hits else ""
-        add("dns", "本地 DNS 与泄露信号", state, f"Real-IP 解析 ({claude_dns}{extra})")
+        add("dns", "本地与上游 DNS 泄露", state, f"Real-IP 解析 ({claude_dns}{extra}{upstream_dns_note})")
     else:
-        add("dns", "本地 DNS 与泄露信号", "unknown", f"未能解析 claude.ai (系统DNS={','.join(dns_servers[:3]) or '无'})")
+        add("dns", "本地与上游 DNS 泄露", "unknown", f"未能解析 claude.ai (系统DNS={','.join(dns_servers[:3]) or '无'})")
 
     # 4. 代理环境变量与系统代理冲突审计 (参考 TZZ520/claude-environment-check，自动脱敏)
     env_proxies = {}

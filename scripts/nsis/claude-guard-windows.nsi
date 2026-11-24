@@ -51,6 +51,8 @@ Section "主程序与防泄露安全引擎" SecMain
 
     SetOutPath "$INSTDIR"
     File "/oname=使用说明.md" "..\..\portable-kit\README-交付手册.md"
+    File "..\..\portable-kit\templates\断网急救.txt"
+    File "..\..\portable-kit\templates\Clash-Verge-防漏覆写模板.yaml"
 
     ; 生成标准 Windows 卸载器
     WriteUninstaller "$INSTDIR\Uninstall.exe"

@@ -1,0 +1,27 @@
+================================================================
+  Claude 安全锁 · 断网急救指南（断网时照抄执行即可 5 秒恢复）
+================================================================
+
+【常见原因】
+1. 代理客户端（Stash / 小火箭 / Clash Verge / v2rayN）未开启「全局 + TUN」；
+2. 在「全封闭模式」下填错了第一跳代理入口 IP（链式代理须填第一跳入口 IP）。
+
+----------------------------------------------------------------
+一、macOS 急救步骤
+----------------------------------------------------------------
+方法 1（推荐）：双击桌面或应用程序里的「Claude安全锁」→ 点击「关闭安全锁」即可立刻恢复日常上网（Claude 仍保持锁死不泄露）。
+方法 2（彻底卸载）：双击 DMG 里的「卸载Claude安全锁.app」。
+方法 3（终端兜底，直接复制粘贴运行）：
+  sudo launchctl bootout system/com.claude-guard.pfboot
+  sudo pfctl -a com.claude-guard -F all
+  sudo rm -f /etc/pf.anchors/com.claude-guard /Library/LaunchDaemons/com.claude-guard.pfboot.plist
+  sudo pfctl -f /etc/pf.conf
+
+----------------------------------------------------------------
+二、Windows 急救步骤
+----------------------------------------------------------------
+方法 1（推荐）：双击桌面「Claude安全锁」→ 点击「关闭安全锁」即可立刻恢复日常上网。
+方法 2（标准卸载）：打开 Windows「控制面板 → 卸载程序」卸载「Claude安全锁」。
+方法 3（管理员 PowerShell 兜底，直接复制粘贴运行）：
+  powershell -ExecutionPolicy Bypass -File "C:\ProgramData\ClaudeGuard\windows\claude-guard.ps1" uninstall-all
+================================================================

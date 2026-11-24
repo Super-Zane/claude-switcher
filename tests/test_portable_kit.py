@@ -235,9 +235,11 @@ class PortableKitTests(unittest.TestCase):
         x_name = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
         names = [node.get(x_name) for node in root.iter() if node.get(x_name)]
         self.assertEqual(len(names), len(set(names)), "XAML x:Name 不得重复")
-        for ctrl in ("StatusPill", "StatusText", "StatusSub", "BtnToggleLock", "ChkStrictMode", "NodesInput", "BtnSaveNodes", "BtnInit", "BtnVerifyFw", "BtnCheck", "BtnExport", "OutputBox"):
+        for ctrl in ("StatusPill", "StatusDot", "StatusText", "StatusSub", "BtnToggleLock", "ToggleTitle", "ToggleDesc", "ChkStrictMode", "NodesInput", "BtnSaveNodes", "BtnInit", "BtnTabDash", "BtnTabLog", "LampGrid", "BtnVerifyFw", "BtnCheck", "BtnExport", "OutputBox"):
             self.assertIn(ctrl, names)
             self.assertIn(f"FindName('{ctrl}')", ui_text)
+        self.assertIn("#FFFAF9F5", ui_text, "Windows UI 必须采用 Claude 暖米纸主题")
+        self.assertIn("#FFD97757", ui_text, "Windows UI 必须采用 Claude 陶土橙主色")
         self.assertNotIn("BtnUnlockAll", names, "极简单锁主界面不得暴露解除永久锁的误触按钮")
 
     def test_mac_14_dim_env_audit_active_and_standby_modes(self):

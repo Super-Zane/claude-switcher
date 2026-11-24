@@ -34,10 +34,10 @@ $BLOCKER_VBS = Join-Path $PSScriptRoot 'claude-blocked-alert.vbs'
 
 $ANTHROPIC_ASN_V4 = '160.79.104.0/21'
 $ANTHROPIC_ASN_V6 = '2607:6bc0::/48'
-# 完整覆盖 Claude 主服务 + API/CDN + 专属遥测/埋点/灰度开关/Sentry(o1158394) 崩溃上报域名
+# 完整覆盖 Claude 主服务 + API/CDN + MCP + 专属遥测/埋点/灰度开关/Sentry(o1158394) 崩溃上报域名 (25 个)
 $ANTHROPIC_DOMAINS = @(
     'claude.ai', 'www.claude.ai', 'a-cdn.claude.ai', 'a-api.claude.ai', 'downloads.claude.ai',
-    'claude.com', 'www.claude.com', 'platform.claude.com',
+    'claude.com', 'www.claude.com', 'platform.claude.com', 'claudemcpclient.com',
     'api.anthropic.com', 'anthropic.com', 'www.anthropic.com', 'console.anthropic.com', 'auth.anthropic.com', 'mcp-proxy.anthropic.com',
     'claudeusercontent.com',
     'statsig.anthropic.com', 'events.anthropic.com', 'telemetry.anthropic.com',
@@ -492,7 +492,7 @@ function Invoke-Lock($cfg, [string]$Mode = '') {
     $localExcludes.Add('127.0.0.0/8'); $localExcludes.Add('172.18.0.0/15'); $localExcludes.Add('198.18.0.0/15')
     foreach ($tip in $tun.TunIps) { $localExcludes.Add("$tip/32") }
     $nonTunLocalV4 = Get-ComplementIpv4Ranges @($localExcludes)
-    $publicRemoteV4 = Get-ComplementIpv4Ranges @('10.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')
+    $publicRemoteV4 = Get-ComplementIpv4Ranges @('10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')
     $claudeV4 = Resolve-ClaudeBlockV4 $resolved.Cidrs
 
     # Zero-Gap 原子切换: 先记录旧规则，待全部新规则生效后再删除旧规则，0ms 无空窗
@@ -530,7 +530,7 @@ function Invoke-Lock($cfg, [string]$Mode = '') {
     $shardCount = 0
     if ($Mode -eq 'strict') {
         $remoteExcludes = New-Object System.Collections.Generic.List[string]
-        foreach ($lan in @('10.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')) { $remoteExcludes.Add($lan) }
+        foreach ($lan in @('10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')) { $remoteExcludes.Add($lan) }
         foreach ($c in $resolved.Cidrs) { $remoteExcludes.Add($c) }
         $blockedAll = Get-ComplementIpv4Ranges @($remoteExcludes)
         New-NetFirewallRule -DisplayName 'ClaudeGuard: 全封闭模式仅放行白名单入口 (IPv4)' `
@@ -600,7 +600,7 @@ function Invoke-Standby($cfg) {
     $localExcludes.Add('127.0.0.0/8'); $localExcludes.Add('172.18.0.0/15'); $localExcludes.Add('198.18.0.0/15')
     foreach ($tip in $tun.TunIps) { $localExcludes.Add("$tip/32") }
     $nonTunLocalV4 = Get-ComplementIpv4Ranges @($localExcludes)
-    $publicRemoteV4 = Get-ComplementIpv4Ranges @('10.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')
+    $publicRemoteV4 = Get-ComplementIpv4Ranges @('10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16', '198.18.0.0/15')
     $claudeV4 = Resolve-ClaudeBlockV4 @()
 
     $oldRules = @(Get-NetFirewallRule -Group $FW_GROUP -ErrorAction SilentlyContinue)

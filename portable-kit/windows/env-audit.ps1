@@ -224,20 +224,41 @@ if ($tunIdx.Count -gt 0 -and $bestRoute.Count -gt 0 -and ($tunIdx -contains [int
     Add-AuditItem 'tun' '全局 TUN 与默认路由' 'fail' '未检测到 TUN (Clash Verge 需开服务模式+TUN; v2rayN 需管理员+启用Tun)'
 }
 
-# 3. 本地 DNS 审计 (大陆 DNS 信号 + claude.ai 解析)
+# 3. 本地与上游 DNS 泄露审计 (大陆 DNS 信号 + claude.ai 解析 + isp.ac 上游实测)
 $dnsList = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses } | Where-Object { $_ } | Select-Object -Unique)
 $cnDns = @($dnsList | Where-Object { $CN_DNS_SERVERS -contains $_ })
 $claudeDns = ''
 try { $claudeDns = [string]((Resolve-DnsName claude.ai -Type A -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress) } catch {}
-if ($cnDns.Count -gt 0 -and -not ($claudeDns -like '198.18.*' -or $claudeDns -like '198.19.*')) {
-    Add-AuditItem 'dns' '本地 DNS 与泄露信号' 'fail' "发现大陆 DNS($($cnDns -join ',')) 且 claude.ai 解析=$claudeDns"
+$upCn = @(); $upNote = ''
+if (-not $Offline) {
+    $dl = Invoke-WebProbe 'https://isp.ac/dns-leak-test' 5
+    if ($dl.Code -eq 200 -and $dl.Body) {
+        try {
+            $dj = $dl.Body | ConvertFrom-Json
+            $arr = if ($dj -is [System.Array]) { $dj } elseif ($dj.servers) { @($dj.servers) } else { @($dj) }
+            $ccs = @()
+            foreach ($e in $arr) {
+                $cv = ([string](if ($e.country_code) { $e.country_code } else { $e.country })).ToUpperInvariant()
+                if ($cv) {
+                    $ccs += $cv
+                    if ($cv -eq 'CN' -or $cv -eq 'CHINA') { $upCn += $(if ($e.ip) { [string]$e.ip } else { $cv }) }
+                }
+            }
+            if ($ccs.Count -gt 0) { $upNote = '; 上游DNS=' + (($ccs | Select-Object -Unique | Select-Object -First 3) -join ',') }
+        } catch {}
+    }
+}
+if ($upCn.Count -gt 0) {
+    Add-AuditItem 'dns' '本地与上游 DNS 泄露' 'fail' "上游 DNS 出口检出中国大陆服务器($($upCn -join ','))"
+} elseif ($cnDns.Count -gt 0 -and -not ($claudeDns -like '198.18.*' -or $claudeDns -like '198.19.*')) {
+    Add-AuditItem 'dns' '本地与上游 DNS 泄露' 'fail' "发现大陆 DNS($($cnDns -join ',')) 且 claude.ai 解析=$claudeDns$upNote"
 } elseif ($claudeDns -like '198.18.*' -or $claudeDns -like '198.19.*') {
-    Add-AuditItem 'dns' '本地 DNS 与泄露信号' 'ok' "Fake-IP 隧道接管 (claude.ai=$claudeDns)"
+    Add-AuditItem 'dns' '本地与上游 DNS 泄露' 'ok' "Fake-IP 隧道接管 (claude.ai=$claudeDns$upNote)"
 } elseif ($claudeDns) {
     $st = if ($cnDns.Count -gt 0) { 'warn' } else { 'ok' }
-    Add-AuditItem 'dns' '本地 DNS 与泄露信号' $st "Real-IP 解析 ($claudeDns)"
+    Add-AuditItem 'dns' '本地与上游 DNS 泄露' $st "Real-IP 解析 ($claudeDns$upNote)"
 } else {
-    Add-AuditItem 'dns' '本地 DNS 与泄露信号' 'unknown' "未能解析 claude.ai (系统DNS=$($dnsList -join ','))"
+    Add-AuditItem 'dns' '本地与上游 DNS 泄露' 'unknown' "未能解析 claude.ai (系统DNS=$($dnsList -join ','))"
 }
 
 # 4. 代理环境变量与 Windows 系统代理/PAC 检测 (脱敏)

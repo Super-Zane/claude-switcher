@@ -34,8 +34,8 @@ CLI_LOCK_STATE="${CLAUDE_GUARD_CLI_STATE:-$APP_DIR/locked-cli-paths.txt}"
 
 ANTHROPIC_ASN_V4="160.79.104.0/21"
 ANTHROPIC_ASN_V6="2607:6bc0::/48"
-# 完整覆盖 Claude 主服务 + API/CDN + 专属遥测/埋点/灰度开关/Sentry(o1158394) 崩溃上报域名
-ANTHROPIC_DOMAINS="claude.ai www.claude.ai a-cdn.claude.ai a-api.claude.ai downloads.claude.ai claude.com www.claude.com platform.claude.com api.anthropic.com anthropic.com www.anthropic.com console.anthropic.com auth.anthropic.com mcp-proxy.anthropic.com claudeusercontent.com statsig.anthropic.com events.anthropic.com telemetry.anthropic.com o1158394.ingest.sentry.io o1158394.ingest.us.sentry.io statsigapi.net events.statsigapi.net featuregates.org prodregistryv2.org"
+# 完整覆盖 Claude 主服务 + API/CDN + MCP + 专属遥测/埋点/灰度开关/Sentry(o1158394) 崩溃上报域名 (25 个)
+ANTHROPIC_DOMAINS="claude.ai www.claude.ai a-cdn.claude.ai a-api.claude.ai downloads.claude.ai claude.com www.claude.com platform.claude.com claudemcpclient.com api.anthropic.com anthropic.com www.anthropic.com console.anthropic.com auth.anthropic.com mcp-proxy.anthropic.com claudeusercontent.com statsig.anthropic.com events.anthropic.com telemetry.anthropic.com o1158394.ingest.sentry.io o1158394.ingest.us.sentry.io statsigapi.net events.statsigapi.net featuregates.org prodregistryv2.org"
 
 PF_BEGIN="# BEGIN claude-guard-pf"
 PF_END="# END claude-guard-pf"
@@ -251,7 +251,7 @@ EOF
 # 策略: 代理退出/软件被杀/系统死机重启后依然内核生效
 table <claude_blocked_v4> persist { ${claude_v4} }
 table <claude_blocked_v6> persist { ${ANTHROPIC_ASN_V6} }
-table <claude_guard_lan> const { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }
+table <claude_guard_lan> const { 127.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }
 EOF
     if [ -n "$ip_csv" ]; then
         echo "table <claude_guard_entries> persist { ${ip_csv} }"
@@ -504,11 +504,20 @@ PF_CONF="${PF_CONF}"
 ANCHOR_NAME="${PF_ANCHOR_NAME}"
 ANCHOR_FILE="${PF_ANCHOR_FILE}"
 if [ -f "\$ANCHOR_FILE" ]; then
+    NEED_RELOAD=0
     if ! grep -Fq "anchor \"\${ANCHOR_NAME}\"" "\$PF_CONF" 2>/dev/null; then
         printf '\n# BEGIN claude-guard-pf\nanchor "%s"\nload anchor "%s" from "%s"\n# END claude-guard-pf\n' "\$ANCHOR_NAME" "\$ANCHOR_NAME" "\$ANCHOR_FILE" >> "\$PF_CONF"
+        NEED_RELOAD=1
     fi
-    /sbin/pfctl -f "\$PF_CONF" >/dev/null 2>&1 || true
-    /sbin/pfctl -e >/dev/null 2>&1 || true
+    if ! /sbin/pfctl -s info 2>/dev/null | grep -qi 'Status: Enabled'; then
+        NEED_RELOAD=1
+    elif ! /sbin/pfctl -a "\$ANCHOR_NAME" -sr 2>/dev/null | grep -q 'block drop out log quick'; then
+        NEED_RELOAD=1
+    fi
+    if [ "\$NEED_RELOAD" = "1" ]; then
+        /sbin/pfctl -f "\$PF_CONF" >/dev/null 2>&1 || true
+        /sbin/pfctl -e >/dev/null 2>&1 || true
+    fi
 fi
 BOOTEOF
     chmod 755 "$PF_BOOT_SCRIPT"
@@ -524,6 +533,7 @@ BOOTEOF
         <string>${PF_BOOT_SCRIPT}</string>
     </array>
     <key>RunAtLoad</key><true/>
+    <key>StartInterval</key><integer>60</integer>
 </dict></plist>
 PLISTEOF
     /usr/bin/xattr -d com.apple.quarantine "$PF_BOOT_PLIST" 2>/dev/null || true

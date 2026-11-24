@@ -1,0 +1,83 @@
+# Clash Verge Rev / Mihomo「国内白名单直连 + 其余全走海外（无 DIRECT 兜底）」覆写模板
+# 使用方式（可选，搭配「Claude安全锁」实现国内微信/飞书/B站秒开 + 海外与全部遥测 100% 锁死海外出口）:
+#   1. 在 Clash Verge Rev 中开启「服务模式 (Service Mode)」+「TUN 模式」+「开机自启」；
+#   2. 关闭设置里的「DNS 覆写」与「IPv6」；
+#   3. 将本文件内容粘贴到订阅的「全局扩展配置 (Merge)」中，把「海外出口」里的节点名替换为你的实际海外非港澳节点（或家宽链式落地节点）。
+
+mode: rule
+ipv6: false
+
+tun:
+  enable: true
+  stack: mixed
+  auto-route: true
+  auto-detect-interface: true
+  strict-route: true
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://cloudflare-dns.com/dns-query
+    - https://dns.google/dns-query
+  nameserver-policy:
+    "rule-set:direct":
+      - 223.5.5.5
+      - 119.29.29.29
+  proxy-server-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+
+rule-providers:
+  direct:
+    type: http
+    behavior: domain
+    url: "https://fastly.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt"
+    path: ./ruleset/direct.yaml
+    interval: 86400
+  cncidr:
+    type: http
+    behavior: ipcidr
+    url: "https://fastly.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/cncidr.txt"
+    path: ./ruleset/cncidr.yaml
+    interval: 86400
+
+# 注意: 策略组「海外出口」中严禁放 DIRECT，节点掉线直接断网绝不回落直连！
+rules:
+  # 1. Claude 全系域名与遥测强制走海外出口
+  - DOMAIN-SUFFIX,claude.ai,海外出口
+  - DOMAIN-SUFFIX,claude.com,海外出口
+  - DOMAIN-SUFFIX,anthropic.com,海外出口
+  - DOMAIN-SUFFIX,claudeusercontent.com,海外出口
+  - DOMAIN-SUFFIX,claudemcpclient.com,海外出口
+  - DOMAIN-SUFFIX,statsigapi.net,海外出口
+  - DOMAIN-SUFFIX,featuregates.org,海外出口
+  - DOMAIN,o1158394.ingest.sentry.io,海外出口
+  - DOMAIN,o1158394.ingest.us.sentry.io,海外出口
+  # 2. 局域网与保留段 (含 100.64.0.0/10) 直连
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  # 3. 微信与 B 站视频加速直连
+  - DOMAIN-KEYWORD,mirrorakam,DIRECT
+  - DOMAIN-SUFFIX,bilibili.com,DIRECT
+  - DOMAIN-SUFFIX,bilivideo.com,DIRECT
+  - DOMAIN-SUFFIX,weixin.qq.com,DIRECT
+  - DOMAIN-SUFFIX,wechat.com,DIRECT
+  # 4. 关键顺序: 先拦截混在国内白名单里的海外统计域名(如 googletagmanager/doubleclick)进海外出口
+  - GEOSITE,geolocation-!cn,海外出口
+  # 5. 纯国内域名与国内 IP 段直连
+  - RULE-SET,direct,DIRECT
+  - RULE-SET,cncidr,DIRECT,no-resolve
+  # 6. 最终兜底焊死在海外出口 (彻底干掉 DIRECT 兜底!)
+  - MATCH,海外出口
